@@ -1,4 +1,8 @@
-use gpui::{div, prelude::*, px, App, ElementId, IntoElement, ParentElement, SharedString, Styled};
+use std::collections::HashSet;
+
+use gpui::{
+    div, prelude::*, px, App, ElementId, IntoElement, ParentElement, SharedString, Styled,
+};
 
 use crate::api::types::{DiffFile, FileStatus};
 use crate::ui::theme::{Theme, UI_FONT};
@@ -6,8 +10,11 @@ use crate::ui::theme::{Theme, UI_FONT};
 pub fn render_file_list(
     files: &[DiffFile],
     selected: Option<usize>,
+    viewed: &HashSet<String>,
     on_select: impl Fn(usize, &mut App) + 'static + Clone,
+    on_toggle_viewed: impl Fn(usize, &mut App) + 'static + Clone,
 ) -> impl IntoElement {
+    let viewed_count = files.iter().filter(|f| viewed.contains(&f.path)).count();
     div()
         .w(px(280.0))
         .h_full()
@@ -27,9 +34,9 @@ pub fn render_file_list(
                 .text_color(Theme::TEXT_MUTED)
                 .text_size(px(12.0))
                 .child(SharedString::from(format!(
-                    "{} changed file{}",
-                    files.len(),
-                    if files.len() == 1 { "" } else { "s" }
+                    "{}/{} viewed",
+                    viewed_count,
+                    files.len()
                 ))),
         )
         .child(
@@ -40,8 +47,17 @@ pub fn render_file_list(
                 .overflow_y_scroll()
                 .children(files.iter().enumerate().map(|(idx, file)| {
                     let is_selected = Some(idx) == selected;
-                    let cb = on_select.clone();
-                    file_row(idx, file, is_selected, move |cx| cb(idx, cx))
+                    let is_viewed = viewed.contains(&file.path);
+                    let sel = on_select.clone();
+                    let toggle = on_toggle_viewed.clone();
+                    file_row(
+                        idx,
+                        file,
+                        is_selected,
+                        is_viewed,
+                        move |cx| sel(idx, cx),
+                        move |cx| toggle(idx, cx),
+                    )
                 })),
         )
 }
@@ -50,7 +66,9 @@ fn file_row(
     idx: usize,
     file: &DiffFile,
     selected: bool,
+    viewed: bool,
     on_click: impl Fn(&mut App) + 'static,
+    on_toggle_viewed: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
     let bg = if selected {
         Theme::BG_SELECTED
@@ -58,6 +76,9 @@ fn file_row(
         Theme::BG_ELEVATED
     };
     let id: ElementId = ElementId::Integer(idx as u64);
+    let toggle_id =
+        ElementId::Name(SharedString::from(format!("file-viewed-{idx}")));
+    let text_color = if viewed { Theme::TEXT_MUTED } else { Theme::TEXT };
 
     div()
         .id(id)
@@ -73,11 +94,13 @@ fn file_row(
         .border_color(Theme::BORDER)
         .cursor_pointer()
         .on_click(move |_event, _window, cx| on_click(cx))
+        .child(viewed_checkbox(toggle_id, viewed, on_toggle_viewed))
         .child(status_badge(&file.status))
         .child(
             div()
                 .flex_1()
                 .text_size(px(13.0))
+                .text_color(text_color)
                 .child(SharedString::from(file.path.clone())),
         )
         .child(
@@ -96,6 +119,38 @@ fn file_row(
                         .child(SharedString::from(format!("-{}", file.deletions))),
                 ),
         )
+}
+
+fn viewed_checkbox(
+    id: ElementId,
+    checked: bool,
+    on_toggle: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let (label, fg) = if checked {
+        ("✓", Theme::FILE_STATUS_ADD)
+    } else {
+        ("·", Theme::TEXT_MUTED)
+    };
+    div()
+        .id(id)
+        .w(px(18.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(11.0))
+        .text_color(fg)
+        .border_1()
+        .border_color(Theme::BORDER)
+        .rounded_xs()
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG_HOVER))
+        .on_click(move |_e, _w, cx| {
+            // The outer row's on_click also fires, so a checkbox click both
+            // selects the file and toggles its viewed state.
+            on_toggle(cx);
+        })
+        .child(SharedString::from(label))
 }
 
 fn status_badge(status: &FileStatus) -> impl IntoElement {

@@ -10,6 +10,7 @@ mod api;
 mod app;
 mod highlighting;
 mod ui;
+mod viewed_store;
 
 use crate::api::ApiClient;
 use crate::app::DifitApp;
@@ -48,6 +49,7 @@ fn main() -> Result<()> {
 
     application().run(move |cx: &mut App| {
         crate::ui::text_input::bind_keys(cx);
+        crate::ui::keybindings::bind_keys(cx);
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let options = WindowOptions {

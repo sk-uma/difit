@@ -1,9 +1,13 @@
 pub mod actions;
 pub mod comment_card;
+pub mod comments_list_modal;
 pub mod compose_bar;
 pub mod diff_rows;
 pub mod diff_view;
 pub mod file_list;
+pub mod help_modal;
+pub mod keybindings;
+pub mod revision_modal;
 pub mod revision_picker;
 pub mod text_input;
 pub mod theme;

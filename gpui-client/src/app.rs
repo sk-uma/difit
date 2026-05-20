@@ -1,11 +1,10 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, IntoElement, ListAlignment, ListState,
-    ParentElement, SharedString, Styled, Window,
+    div, prelude::*, px, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
+    ListAlignment, ListState, ParentElement, SharedString, Styled, Window,
 };
-
-use gpui::ClipboardItem;
 
 use crate::api::client::{CommentSelectionQuery, DiffQuery, WatchEvent};
 use crate::api::types::{
@@ -14,13 +13,21 @@ use crate::api::types::{
 };
 use crate::api::ApiClient;
 use crate::ui::actions::{DiffAction, DiffActions};
+use crate::ui::comments_list_modal::render_comments_list_modal;
 use crate::ui::compose_bar::render_compose_bar;
 use crate::ui::diff_rows::{build_rows, CommentAnchor, DiffRow};
 use crate::ui::diff_view::{count_threads_for_file, render_diff, DiffViewMode, RenderedDiff};
 use crate::ui::file_list::render_file_list;
+use crate::ui::help_modal::render_help_modal;
+use crate::ui::keybindings::{
+    Compose, Escape, NextFile, NextRow, OpenInEditor, PrevFile, PrevRow, Refresh, ToggleHelp,
+    ToggleIgnoreWhitespace, ToggleMergeBase, ToggleViewMode,
+};
+use crate::ui::revision_modal::render_revision_modal;
 use crate::ui::revision_picker::{render_revision_picker, RevisionRole};
 use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
+use crate::viewed_store::{is_auto_viewed, ViewedStore};
 
 pub struct DifitApp {
     api: Arc<ApiClient>,
@@ -43,6 +50,17 @@ pub struct DifitApp {
     composing: Option<ComposeState>,
     ignore_whitespace: bool,
     use_merge_base: bool,
+    focus_handle: FocusHandle,
+    show_help: bool,
+    show_revision_modal: bool,
+    show_comments_list: bool,
+    /// Index into the current `rendered_cache.rows` for the keyboard-
+    /// focused row. Skips non-anchorable rows during j/k navigation.
+    selected_row: Option<usize>,
+    viewed: ViewedStore,
+    /// Repos for which we've already run the auto-viewed pass this
+    /// process. Prevents re-marking on every diff refresh.
+    auto_viewed_done: HashSet<String>,
 }
 
 struct ComposeState {
@@ -75,8 +93,8 @@ struct RenderedCacheEntry {
 }
 
 impl DifitApp {
-    pub fn new(api: Arc<ApiClient>, _window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let view = cx.new(|_cx| Self {
+    pub fn new(api: Arc<ApiClient>, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let view = cx.new(|cx| Self {
             api: api.clone(),
             diff: None,
             diff_generation: 0,
@@ -94,7 +112,17 @@ impl DifitApp {
             composing: None,
             ignore_whitespace: false,
             use_merge_base: false,
+            focus_handle: cx.focus_handle(),
+            show_help: false,
+            show_revision_modal: false,
+            show_comments_list: false,
+            selected_row: None,
+            viewed: ViewedStore::load(),
+            auto_viewed_done: HashSet::new(),
         });
+
+        let handle = view.read(cx).focus_handle.clone();
+        window.focus(&handle, cx);
 
         view.update(cx, |this, cx| {
             this.refresh_diff(cx);
@@ -143,9 +171,11 @@ impl DifitApp {
                             this.selected_target = Some(target);
                         }
                         let file_count = diff.files.len();
+                        let repo_id = diff.repository_id.clone();
                         this.diff = Some(Arc::new(diff));
                         this.diff_generation = this.diff_generation.wrapping_add(1);
                         this.rendered_cache = None;
+                        this.apply_auto_viewed(repo_id.as_deref());
                         this.refresh_comments(cx);
                         this.selected = match this.selected {
                             Some(i) if i < file_count => Some(i),
@@ -571,6 +601,264 @@ impl DifitApp {
         self.refresh_diff(cx);
     }
 
+    // -- Keyboard action handlers ---------------------------------------
+
+    fn on_next_row(&mut self, _: &NextRow, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected_row(1, cx);
+    }
+    fn on_prev_row(&mut self, _: &PrevRow, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected_row(-1, cx);
+    }
+    fn on_next_file(&mut self, _: &NextFile, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected_file(1, cx);
+    }
+    fn on_prev_file(&mut self, _: &PrevFile, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected_file(-1, cx);
+    }
+    fn on_compose_key(&mut self, _: &Compose, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(anchor) = self.selected_row_anchor() {
+            self.start_compose_at(anchor, window, cx);
+        } else {
+            self.start_compose(window, cx);
+        }
+    }
+    fn on_toggle_view_mode(
+        &mut self,
+        _: &ToggleViewMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.view_mode = self.view_mode.toggle();
+        self.rendered_cache = None;
+        cx.notify();
+    }
+    fn on_toggle_ignore_whitespace(
+        &mut self,
+        _: &ToggleIgnoreWhitespace,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_ignore_whitespace(cx);
+    }
+    fn on_toggle_merge_base(
+        &mut self,
+        _: &ToggleMergeBase,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_merge_base(cx);
+    }
+    fn on_refresh_key(&mut self, _: &Refresh, _window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_diff(cx);
+    }
+    fn on_open_in_editor_key(
+        &mut self,
+        _: &OpenInEditor,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let line = self.selected_row_anchor().map(|a| a.line);
+        self.open_in_editor(line, cx);
+    }
+    fn on_toggle_help(
+        &mut self,
+        _: &ToggleHelp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_help = !self.show_help;
+        cx.notify();
+    }
+    fn on_escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_help {
+            self.show_help = false;
+            cx.notify();
+        } else if self.show_revision_modal {
+            self.show_revision_modal = false;
+            cx.notify();
+        } else if self.show_comments_list {
+            self.show_comments_list = false;
+            cx.notify();
+        } else if self.composing.is_some() {
+            self.cancel_compose(cx);
+        } else if self.base_picker_open || self.target_picker_open {
+            self.base_picker_open = false;
+            self.target_picker_open = false;
+            cx.notify();
+        }
+    }
+
+    fn selected_row_anchor(&self) -> Option<CommentAnchor> {
+        let cache = self.rendered_cache.as_ref()?;
+        let idx = self.selected_row?;
+        let row = cache.rows.get(idx)?;
+        match row {
+            DiffRow::Unified(cell) => cell.anchor,
+            DiffRow::Split { left, right } => {
+                left.as_ref().and_then(|c| c.anchor)
+                    .or_else(|| right.as_ref().and_then(|c| c.anchor))
+            }
+            _ => None,
+        }
+    }
+
+    fn move_selected_row(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let Some(cache) = self.rendered_cache.as_ref() else {
+            return;
+        };
+        if cache.rows.is_empty() {
+            return;
+        }
+        let anchorable: Vec<usize> = cache
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| match row {
+                DiffRow::Unified(cell) if cell.anchor.is_some() => Some(i),
+                DiffRow::Split { left, right }
+                    if left.as_ref().and_then(|c| c.anchor).is_some()
+                        || right.as_ref().and_then(|c| c.anchor).is_some() =>
+                {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .collect();
+        if anchorable.is_empty() {
+            return;
+        }
+        let current_pos = self
+            .selected_row
+            .and_then(|sel| anchorable.iter().position(|&i| i == sel));
+        let next_pos = match (current_pos, dir) {
+            (None, d) if d > 0 => 0,
+            (None, _) => anchorable.len() - 1,
+            (Some(p), d) if d > 0 => (p + 1).min(anchorable.len() - 1),
+            (Some(p), _) => p.saturating_sub(1),
+        };
+        let idx = anchorable[next_pos];
+        self.selected_row = Some(idx);
+        cache.list_state.scroll_to_reveal_item(idx);
+        cx.notify();
+    }
+
+    fn move_selected_file(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.as_ref() else {
+            return;
+        };
+        let n = diff.files.len();
+        if n == 0 {
+            return;
+        }
+        let next = match (self.selected, dir) {
+            (None, d) if d > 0 => 0,
+            (None, _) => n - 1,
+            (Some(i), d) if d > 0 => (i + 1).min(n - 1),
+            (Some(i), _) => i.saturating_sub(1),
+        };
+        if self.selected != Some(next) {
+            self.selected = Some(next);
+            self.selected_row = None;
+            self.rendered_cache = None;
+            self.composing = None;
+            cx.notify();
+        }
+    }
+
+    fn jump_to_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let Some(thread) = self.comments.iter().find(|t| t.id == thread_id).cloned() else {
+            return;
+        };
+        let path = thread.file_path;
+        let anchor_line = match thread.position.line {
+            DiffLineRange::Single(n) => n,
+            DiffLineRange::Range { end, .. } => end,
+        };
+        let side = thread.position.side;
+
+        let Some(diff) = self.diff.as_ref() else { return };
+        let Some(idx) = diff.files.iter().position(|f| f.path == path) else {
+            return;
+        };
+        if self.selected != Some(idx) {
+            self.selected = Some(idx);
+            self.rendered_cache = None;
+            self.composing = None;
+        }
+        self.show_comments_list = false;
+
+        if let Some(rendered) = self.ensure_rendered() {
+            for (i, row) in rendered.rows.iter().enumerate() {
+                let matches = match row {
+                    DiffRow::Unified(cell) => cell
+                        .anchor
+                        .map(|a| a.side == side && a.line == anchor_line)
+                        .unwrap_or(false),
+                    DiffRow::Split { left, right } => {
+                        let in_left = left
+                            .as_ref()
+                            .and_then(|c| c.anchor)
+                            .map(|a| a.side == side && a.line == anchor_line)
+                            .unwrap_or(false);
+                        let in_right = right
+                            .as_ref()
+                            .and_then(|c| c.anchor)
+                            .map(|a| a.side == side && a.line == anchor_line)
+                            .unwrap_or(false);
+                        in_left || in_right
+                    }
+                    _ => false,
+                };
+                if matches {
+                    self.selected_row = Some(i);
+                    rendered.list_state.scroll_to_reveal_item(i);
+                    break;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_auto_viewed(&mut self, repo_id: Option<&str>) {
+        let Some(repo_id) = repo_id else { return };
+        if !self.auto_viewed_done.insert(repo_id.to_string()) {
+            return;
+        }
+        let Some(diff) = self.diff.as_ref() else { return };
+        let mut changed = false;
+        for f in &diff.files {
+            if is_auto_viewed(&f.path) && !self.viewed.is_viewed(repo_id, &f.path) {
+                self.viewed.set_viewed(repo_id, &f.path, true);
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(e) = self.viewed.save() {
+                log::warn!("viewed save failed: {e:#}");
+            }
+        }
+    }
+
+    fn toggle_viewed(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else { return };
+        let Some(file) = diff.files.get(idx) else { return };
+        let Some(repo_id) = diff.repository_id.as_deref() else { return };
+        let new_state = !self.viewed.is_viewed(repo_id, &file.path);
+        self.viewed.set_viewed(repo_id, &file.path, new_state);
+        if let Err(e) = self.viewed.save() {
+            log::warn!("viewed save failed: {e:#}");
+        }
+        cx.notify();
+    }
+
+    fn viewed_paths_for_current_repo(&self) -> HashSet<String> {
+        self.diff
+            .as_ref()
+            .and_then(|d| d.repository_id.as_deref())
+            .and_then(|repo_id| self.viewed.repos.get(repo_id).cloned())
+            .unwrap_or_default()
+    }
+
     fn build_actions(&self, entity: &Entity<DifitApp>) -> DiffActions {
         let entity = entity.clone();
         Arc::new(move |action, window, cx| {
@@ -695,10 +983,19 @@ fn short_commit(diff: &DiffResponse) -> String {
     format!("{} ← {}", trunc(&target), trunc(&base))
 }
 
+impl Focusable for DifitApp {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for DifitApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let can_compose = self.current_file_path().is_some();
         let composing_active = self.composing.is_some();
+        let show_help = self.show_help;
+        let show_revision_modal = self.show_revision_modal;
+        let show_comments_list = self.show_comments_list;
         // Snapshot lightweight state up-front; heavy data stays behind Arcs.
         let view_mode = self.view_mode;
         let revisions = self.revisions.clone();
@@ -717,6 +1014,7 @@ impl Render for DifitApp {
 
         let entity = cx.entity();
         let actions = self.build_actions(&entity);
+        let viewed_paths: HashSet<String> = self.viewed_paths_for_current_repo();
 
         // Avoid cloning the entire file list every frame — borrow it for
         // file_list rendering and active_file lookup via the same Arc.
@@ -730,10 +1028,24 @@ impl Render for DifitApp {
             .map(|f| count_threads_for_file(&f.path, comments.iter()))
             .unwrap_or(0);
 
-        div()
+        let root = div()
             .size_full()
             .flex()
             .flex_col()
+            .key_context("DifitApp")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_next_row))
+            .on_action(cx.listener(Self::on_prev_row))
+            .on_action(cx.listener(Self::on_next_file))
+            .on_action(cx.listener(Self::on_prev_file))
+            .on_action(cx.listener(Self::on_compose_key))
+            .on_action(cx.listener(Self::on_toggle_view_mode))
+            .on_action(cx.listener(Self::on_toggle_ignore_whitespace))
+            .on_action(cx.listener(Self::on_toggle_merge_base))
+            .on_action(cx.listener(Self::on_refresh_key))
+            .on_action(cx.listener(Self::on_open_in_editor_key))
+            .on_action(cx.listener(Self::on_toggle_help))
+            .on_action(cx.listener(Self::on_escape))
             .bg(Theme::BG)
             .text_color(Theme::TEXT)
             .font_family(UI_FONT)
@@ -758,17 +1070,29 @@ impl Render for DifitApp {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(render_file_list(files, selected, {
-                        let entity = entity.clone();
-                        move |idx, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.selected = Some(idx);
-                                this.rendered_cache = None;
-                                this.composing = None;
-                                cx.notify();
-                            });
-                        }
-                    }))
+                    .child(render_file_list(
+                        files,
+                        selected,
+                        &viewed_paths,
+                        {
+                            let entity = entity.clone();
+                            move |idx, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.selected = Some(idx);
+                                    this.selected_row = None;
+                                    this.rendered_cache = None;
+                                    this.composing = None;
+                                    cx.notify();
+                                });
+                            }
+                        },
+                        {
+                            let entity = entity.clone();
+                            move |idx, cx| {
+                                entity.update(cx, |this, cx| this.toggle_viewed(idx, cx));
+                            }
+                        },
+                    ))
                     .child(self.render_diff_pane(
                         active_file,
                         rendered,
@@ -777,7 +1101,78 @@ impl Render for DifitApp {
                         actions,
                         cx,
                     )),
-            )
+            );
+
+        let root = if show_help {
+            let entity_for_close = entity.clone();
+            root.child(render_help_modal(move |cx| {
+                entity_for_close.update(cx, |this, cx| {
+                    this.show_help = false;
+                    cx.notify();
+                });
+            }))
+        } else {
+            root
+        };
+
+        let root = if show_revision_modal {
+            let entity_for_close = entity.clone();
+            let diff_for_modal = self.diff.clone();
+            let revs_for_modal = self.revisions.clone();
+            let ignore_ws = self.ignore_whitespace;
+            let merge_base = self.use_merge_base;
+            root.child(render_revision_modal(
+                diff_for_modal.as_deref(),
+                revs_for_modal.as_ref(),
+                ignore_ws,
+                merge_base,
+                move |cx| {
+                    entity_for_close.update(cx, |this, cx| {
+                        this.show_revision_modal = false;
+                        cx.notify();
+                    });
+                },
+            ))
+        } else {
+            root
+        };
+
+        if show_comments_list {
+            let entity_for_jump = entity.clone();
+            let entity_for_close = entity.clone();
+            let threads = comments.clone();
+            root.child(render_comments_list_modal(
+                threads,
+                move |_path, cx| {
+                    // The on_jump callback gets a file_path string in the
+                    // current API; we need a thread id, so do the lookup
+                    // through the most recent thread for that file. The
+                    // comments_list closure passes the file_path directly
+                    // (see the row builder).
+                    entity_for_jump.update(cx, |this, cx| {
+                        // Find the first thread whose file matches and jump
+                        // to it. Good enough since rows already include the
+                        // file column.
+                        if let Some(thread_id) = this
+                            .comments
+                            .iter()
+                            .find(|t| t.file_path == _path)
+                            .map(|t| t.id.clone())
+                        {
+                            this.jump_to_thread(thread_id, cx);
+                        }
+                    });
+                },
+                move |cx| {
+                    entity_for_close.update(cx, |this, cx| {
+                        this.show_comments_list = false;
+                        cx.notify();
+                    });
+                },
+            ))
+        } else {
+            root
+        }
     }
 }
 
@@ -869,6 +1264,9 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let entity_mb = entity.clone();
     let entity_open = entity.clone();
     let entity_copy = entity.clone();
+    let entity_info = entity.clone();
+    let entity_help = entity.clone();
+    let entity_threads = entity.clone();
     let active_path_for_open = active_path.clone();
     let active_path_for_copy = active_path;
 
@@ -1006,6 +1404,33 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
                 });
             },
         ))
+        .child(header_button("comments-list", "Threads", {
+            let entity = entity_threads;
+            move |cx: &mut App| {
+                entity.update(cx, |this, cx| {
+                    this.show_comments_list = !this.show_comments_list;
+                    cx.notify();
+                });
+            }
+        }))
+        .child(header_button("info", "Info", {
+            let entity = entity_info;
+            move |cx: &mut App| {
+                entity.update(cx, |this, cx| {
+                    this.show_revision_modal = !this.show_revision_modal;
+                    cx.notify();
+                });
+            }
+        }))
+        .child(header_button("help", "?", {
+            let entity = entity_help;
+            move |cx: &mut App| {
+                entity.update(cx, |this, cx| {
+                    this.show_help = !this.show_help;
+                    cx.notify();
+                });
+            }
+        }))
 }
 
 fn toggle_header_button(
