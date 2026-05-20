@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
@@ -12,10 +12,10 @@ use crate::api::types::{
     DiffSide, RevisionsResponse,
 };
 use crate::api::ApiClient;
-use crate::ui::actions::{DiffAction, DiffActions};
+use crate::ui::actions::{DiffAction, DiffActions, ExpandDirection};
 use crate::ui::comments_list_modal::render_comments_list_modal;
 use crate::ui::compose_bar::render_compose_bar;
-use crate::ui::diff_rows::{build_rows, CommentAnchor, DiffRow};
+use crate::ui::diff_rows::{build_rows, expand_step, CommentAnchor, DiffRow, ExpansionMap};
 use crate::ui::diff_view::{count_threads_for_file, render_diff, DiffViewMode, RenderedDiff};
 use crate::ui::file_list::render_file_list;
 use crate::ui::help_modal::render_help_modal;
@@ -25,6 +25,8 @@ use crate::ui::keybindings::{
 };
 use crate::ui::revision_modal::render_revision_modal;
 use crate::ui::revision_picker::{render_revision_picker, RevisionRole};
+use crate::settings_store::{self, Settings};
+use crate::ui::settings_modal::render_settings_modal;
 use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
 use crate::viewed_store::{is_auto_viewed, ViewedStore};
@@ -54,6 +56,17 @@ pub struct DifitApp {
     show_help: bool,
     show_revision_modal: bool,
     show_comments_list: bool,
+    show_settings_modal: bool,
+    settings: Settings,
+    settings_version: u64,
+    /// Per-file expansion counts (above, below) for each chunk.
+    expansions: HashMap<String, ExpansionMap>,
+    /// Cached blob contents keyed by (path, ref). Used for context
+    /// expansion above/below diff chunks.
+    blob_cache: HashMap<(String, String), Arc<Vec<String>>>,
+    /// Bumped whenever expansions or blob_cache change; part of the
+    /// rendered-rows cache key.
+    expansion_version: u64,
     /// Index into the current `rendered_cache.rows` for the keyboard-
     /// focused row. Skips non-anchorable rows during j/k navigation.
     selected_row: Option<usize>,
@@ -84,6 +97,8 @@ struct RenderedCacheKey {
     view_mode: DiffViewMode,
     diff_generation: u64,
     comments_version: u64,
+    settings_version: u64,
+    expansion_version: u64,
 }
 
 struct RenderedCacheEntry {
@@ -116,6 +131,12 @@ impl DifitApp {
             show_help: false,
             show_revision_modal: false,
             show_comments_list: false,
+            show_settings_modal: false,
+            settings: settings_store::snapshot(),
+            settings_version: 0,
+            expansions: HashMap::new(),
+            blob_cache: HashMap::new(),
+            expansion_version: 0,
             selected_row: None,
             viewed: ViewedStore::load(),
             auto_viewed_done: HashSet::new(),
@@ -591,6 +612,74 @@ impl DifitApp {
         .detach();
     }
 
+    fn expansion_ref(&self) -> String {
+        self.selected_target
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "HEAD".to_string())
+    }
+
+    fn expand_context(
+        &mut self,
+        chunk_idx: usize,
+        direction: ExpandDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.current_file_path() else { return };
+        let ref_name = self.expansion_ref();
+        let key = (path.clone(), ref_name.clone());
+
+        let inc = expand_step();
+        let entry = self.expansions.entry(path.clone()).or_default();
+        let counts = entry.entry(chunk_idx).or_insert((0, 0));
+        match direction {
+            ExpandDirection::Above => counts.0 = counts.0.saturating_add(inc),
+            ExpandDirection::Below => counts.1 = counts.1.saturating_add(inc),
+        }
+
+        self.expansion_version = self.expansion_version.wrapping_add(1);
+        self.rendered_cache = None;
+
+        if !self.blob_cache.contains_key(&key) {
+            let path_for_fetch = path;
+            let ref_for_fetch = ref_name;
+            let rx = self
+                .api
+                .fetch_blob(path_for_fetch.clone(), ref_for_fetch.clone());
+            cx.spawn(async move |this, cx| {
+                match rx.await {
+                    Ok(Ok(bytes)) => {
+                        let text = String::from_utf8_lossy(&bytes).to_string();
+                        let lines: Vec<String> = text.split('\n').map(String::from).collect();
+                        let _ = this.update(cx, |this, cx| {
+                            this.blob_cache
+                                .insert((path_for_fetch, ref_for_fetch), Arc::new(lines));
+                            this.expansion_version =
+                                this.expansion_version.wrapping_add(1);
+                            this.rendered_cache = None;
+                            cx.notify();
+                        });
+                    }
+                    Ok(Err(e)) => log::warn!("blob fetch failed: {e:#}"),
+                    Err(_) => {}
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn apply_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        self.settings = settings.clone();
+        settings_store::install(settings.clone());
+        if let Err(e) = settings.save() {
+            log::warn!("settings save failed: {e:#}");
+        }
+        self.settings_version = self.settings_version.wrapping_add(1);
+        self.rendered_cache = None;
+        cx.notify();
+    }
+
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
         self.ignore_whitespace = !self.ignore_whitespace;
         self.refresh_diff(cx);
@@ -678,6 +767,9 @@ impl DifitApp {
             cx.notify();
         } else if self.show_comments_list {
             self.show_comments_list = false;
+            cx.notify();
+        } else if self.show_settings_modal {
+            self.show_settings_modal = false;
             cx.notify();
         } else if self.composing.is_some() {
             self.cancel_compose(cx);
@@ -880,6 +972,10 @@ impl DifitApp {
                 DiffAction::DeleteThread { thread_id } => this.delete_thread(thread_id, cx),
                 DiffAction::CopyPromptThread { thread_id } => this.copy_prompt_thread(thread_id, cx),
                 DiffAction::OpenInEditor { side: _, line } => this.open_in_editor(Some(line), cx),
+                DiffAction::ExpandContext {
+                    chunk_idx,
+                    direction,
+                } => this.expand_context(chunk_idx, direction, cx),
             });
         })
     }
@@ -914,6 +1010,8 @@ impl DifitApp {
             view_mode: self.view_mode,
             diff_generation: self.diff_generation,
             comments_version: self.comments_version,
+            settings_version: self.settings_version,
+            expansion_version: self.expansion_version,
         };
 
         let needs_rebuild = self
@@ -923,7 +1021,16 @@ impl DifitApp {
             .unwrap_or(true);
 
         if needs_rebuild {
-            let rows = build_rows(file, self.view_mode, self.comments.as_ref());
+            let expansions = self.expansions.get(&file.path).cloned().unwrap_or_default();
+            let blob_key = (file.path.clone(), self.expansion_ref());
+            let blob = self.blob_cache.get(&blob_key).cloned();
+            let rows = build_rows(
+                file,
+                self.view_mode,
+                self.comments.as_ref(),
+                &expansions,
+                blob.as_deref().map(|v| v.as_slice()),
+            );
             let item_count = rows.len();
             let list_state = ListState::new(item_count, ListAlignment::Top, px(400.0));
             self.rendered_cache = Some(RenderedCacheEntry {
@@ -996,6 +1103,9 @@ impl Render for DifitApp {
         let show_help = self.show_help;
         let show_revision_modal = self.show_revision_modal;
         let show_comments_list = self.show_comments_list;
+        let show_settings_modal = self.show_settings_modal;
+        let settings_snapshot = self.settings.clone();
+        let font_size = self.settings.font_size;
         // Snapshot lightweight state up-front; heavy data stays behind Arcs.
         let view_mode = self.view_mode;
         let revisions = self.revisions.clone();
@@ -1097,6 +1207,7 @@ impl Render for DifitApp {
                         active_file,
                         rendered,
                         thread_count,
+                        font_size,
                         &entity,
                         actions,
                         cx,
@@ -1137,7 +1248,7 @@ impl Render for DifitApp {
             root
         };
 
-        if show_comments_list {
+        let root = if show_comments_list {
             let entity_for_jump = entity.clone();
             let entity_for_close = entity.clone();
             let threads = comments.clone();
@@ -1172,6 +1283,25 @@ impl Render for DifitApp {
             ))
         } else {
             root
+        };
+
+        if show_settings_modal {
+            let entity_apply = entity.clone();
+            let entity_close = entity.clone();
+            root.child(render_settings_modal(
+                settings_snapshot,
+                move |new_settings, cx| {
+                    entity_apply.update(cx, |this, cx| this.apply_settings(new_settings, cx));
+                },
+                move |cx| {
+                    entity_close.update(cx, |this, cx| {
+                        this.show_settings_modal = false;
+                        cx.notify();
+                    });
+                },
+            ))
+        } else {
+            root
         }
     }
 }
@@ -1182,6 +1312,7 @@ impl DifitApp {
         active_file: Option<&crate::api::types::DiffFile>,
         rendered: Option<RenderedDiff>,
         thread_count: usize,
+        font_size: f32,
         entity: &Entity<DifitApp>,
         actions: DiffActions,
         _cx: &mut Context<Self>,
@@ -1192,7 +1323,13 @@ impl DifitApp {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(render_diff(active_file, rendered, thread_count, actions));
+            .child(render_diff(
+                active_file,
+                rendered,
+                thread_count,
+                font_size,
+                actions,
+            ));
 
         if let Some(state) = self.composing.as_ref() {
             let entity_s = entity.clone();
@@ -1267,6 +1404,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let entity_info = entity.clone();
     let entity_help = entity.clone();
     let entity_threads = entity.clone();
+    let entity_settings = entity.clone();
     let active_path_for_open = active_path.clone();
     let active_path_for_copy = active_path;
 
@@ -1418,6 +1556,15 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
             move |cx: &mut App| {
                 entity.update(cx, |this, cx| {
                     this.show_revision_modal = !this.show_revision_modal;
+                    cx.notify();
+                });
+            }
+        }))
+        .child(header_button("settings", "⚙", {
+            let entity = entity_settings;
+            move |cx: &mut App| {
+                entity.update(cx, |this, cx| {
+                    this.show_settings_modal = !this.show_settings_modal;
                     cx.notify();
                 });
             }

@@ -9,6 +9,7 @@ use url::Url;
 mod api;
 mod app;
 mod highlighting;
+mod settings_store;
 mod ui;
 mod viewed_store;
 mod word_diff;
@@ -47,6 +48,8 @@ fn main() -> Result<()> {
     std::mem::forget(runtime);
 
     let api = Arc::new(ApiClient::new(base_url, runtime_handle));
+
+    crate::settings_store::install(crate::settings_store::Settings::load());
 
     application().run(move |cx: &mut App| {
         crate::ui::text_input::bind_keys(cx);

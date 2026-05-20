@@ -34,6 +34,18 @@ pub enum DiffAction {
     CopyPromptThread { thread_id: String },
     /// Open the active file in the configured editor at this line.
     OpenInEditor { side: DiffSide, line: u32 },
+    /// Expand more surrounding context for the given chunk in the
+    /// currently visible file.
+    ExpandContext {
+        chunk_idx: usize,
+        direction: ExpandDirection,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpandDirection {
+    Above,
+    Below,
 }
 
 pub type DiffActions = Arc<dyn Fn(DiffAction, &mut Window, &mut App) + 'static>;

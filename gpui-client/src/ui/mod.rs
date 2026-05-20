@@ -9,5 +9,6 @@ pub mod help_modal;
 pub mod keybindings;
 pub mod revision_modal;
 pub mod revision_picker;
+pub mod settings_modal;
 pub mod text_input;
 pub mod theme;

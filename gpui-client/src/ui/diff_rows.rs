@@ -12,10 +12,13 @@ use std::sync::Arc;
 
 use gpui::{combine_highlights, HighlightStyle, Rgba, SharedString};
 
+use std::collections::HashMap;
+
 use crate::api::types::{
-    DiffCommentThread, DiffFile, DiffLine, DiffLineRange, DiffSide, LineType,
+    DiffChunk, DiffCommentThread, DiffFile, DiffLine, DiffLineRange, DiffSide, LineType,
 };
 use crate::highlighting::{extension_for_path, highlight_line};
+use crate::ui::actions::ExpandDirection;
 use crate::ui::diff_view::DiffViewMode;
 use crate::ui::theme::Theme;
 use crate::word_diff::{word_changes, word_highlight};
@@ -55,19 +58,46 @@ pub enum DiffRow {
     },
     /// A review comment thread anchored to the preceding diff row.
     Comment(Arc<DiffCommentThread>),
+    /// Clickable affordance for fetching more surrounding context above
+    /// (▲) or below (▼) a chunk.
+    Expand {
+        chunk_idx: usize,
+        direction: ExpandDirection,
+        label: SharedString,
+    },
 }
+
+/// Per-chunk how many lines of context the user has expanded above /
+/// below. Indexed by chunk_idx within the active file.
+pub type ExpansionMap = HashMap<usize, (u32, u32)>;
 
 pub fn build_rows(
     file: &DiffFile,
     mode: DiffViewMode,
     comments: &[DiffCommentThread],
+    expansions: &ExpansionMap,
+    blob_lines: Option<&[String]>,
 ) -> Vec<DiffRow> {
     let extension = extension_for_path(&file.path);
     let line_count: usize = file.chunks.iter().map(|c| c.lines.len()).sum();
     let mut rows: Vec<DiffRow> =
-        Vec::with_capacity(line_count + file.chunks.len() + comments.len());
+        Vec::with_capacity(line_count + file.chunks.len() * 3 + comments.len());
 
-    for chunk in &file.chunks {
+    for (chunk_idx, chunk) in file.chunks.iter().enumerate() {
+        let (above_count, below_count) = expansions.get(&chunk_idx).copied().unwrap_or((0, 0));
+
+        // ▲ expand-up affordance + already-expanded above lines (unified
+        // view only — split would need a paired layout we don't model
+        // yet for synthetic context).
+        if mode == DiffViewMode::Unified {
+            rows.push(DiffRow::Expand {
+                chunk_idx,
+                direction: ExpandDirection::Above,
+                label: SharedString::from(format!("▲ Expand {} lines above", expand_step())),
+            });
+            push_expanded_above(&mut rows, chunk, above_count, blob_lines, &extension);
+        }
+
         rows.push(DiffRow::HunkHeader(SharedString::from(chunk.header.clone())));
         match mode {
             DiffViewMode::Unified => {
@@ -75,9 +105,111 @@ pub fn build_rows(
             }
             DiffViewMode::Split => build_split_chunk(&mut rows, &chunk.lines, &extension, comments),
         }
+
+        if mode == DiffViewMode::Unified {
+            push_expanded_below(&mut rows, chunk, below_count, blob_lines, &extension);
+            rows.push(DiffRow::Expand {
+                chunk_idx,
+                direction: ExpandDirection::Below,
+                label: SharedString::from(format!("▼ Expand {} lines below", expand_step())),
+            });
+        }
     }
 
     rows
+}
+
+/// Lines added per click.
+pub fn expand_step() -> u32 {
+    10
+}
+
+fn push_expanded_above(
+    rows: &mut Vec<DiffRow>,
+    chunk: &DiffChunk,
+    above_count: u32,
+    blob_lines: Option<&[String]>,
+    extension: &str,
+) {
+    if above_count == 0 {
+        return;
+    }
+    let Some(blob) = blob_lines else { return };
+    // chunk.new_start is 1-indexed; the line BEFORE the chunk is
+    // chunk.new_start - 1.
+    let chunk_first_new = chunk.new_start as usize;
+    if chunk_first_new <= 1 {
+        return;
+    }
+    let want = above_count as usize;
+    let start_line = chunk_first_new.saturating_sub(want).max(1);
+    let line_range = start_line..chunk_first_new;
+    let old_offset = chunk.old_start as i64 - chunk.new_start as i64;
+    for new_line_no in line_range {
+        let blob_idx = new_line_no - 1;
+        if blob_idx >= blob.len() {
+            break;
+        }
+        let old_line_no = (new_line_no as i64 + old_offset).max(1) as u32;
+        rows.push(DiffRow::Unified(make_context_cell(
+            &blob[blob_idx],
+            Some(old_line_no),
+            Some(new_line_no as u32),
+            extension,
+        )));
+    }
+}
+
+fn push_expanded_below(
+    rows: &mut Vec<DiffRow>,
+    chunk: &DiffChunk,
+    below_count: u32,
+    blob_lines: Option<&[String]>,
+    extension: &str,
+) {
+    if below_count == 0 {
+        return;
+    }
+    let Some(blob) = blob_lines else { return };
+    let chunk_last_new = (chunk.new_start as usize) + (chunk.new_lines as usize) - 1;
+    let start = chunk_last_new + 1;
+    let end = (start + below_count as usize).min(blob.len() + 1);
+    let old_offset = chunk.old_start as i64 - chunk.new_start as i64;
+    for new_line_no in start..end {
+        let blob_idx = new_line_no - 1;
+        if blob_idx >= blob.len() {
+            break;
+        }
+        let old_line_no = (new_line_no as i64 + old_offset).max(1) as u32;
+        rows.push(DiffRow::Unified(make_context_cell(
+            &blob[blob_idx],
+            Some(old_line_no),
+            Some(new_line_no as u32),
+            extension,
+        )));
+    }
+}
+
+fn make_context_cell(
+    content: &str,
+    old_line_no: Option<u32>,
+    new_line_no: Option<u32>,
+    extension: &str,
+) -> RenderedCell {
+    let (text, highlights) = bake_text(content, extension, true);
+    let anchor = new_line_no.map(|n| CommentAnchor {
+        side: DiffSide::New,
+        line: n,
+    });
+    let _ = old_line_no; // kept for future split rendering
+    RenderedCell {
+        bg: Theme::BG_ELEVATED,
+        line_number: new_line_no,
+        anchor,
+        marker: " ",
+        text,
+        highlights,
+    }
 }
 
 fn build_unified_chunk(

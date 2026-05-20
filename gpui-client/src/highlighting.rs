@@ -7,32 +7,50 @@
 //! colored correctly — acceptable trade-off for the diff viewer, since
 //! lines are already shown out of their original sequence anyway.
 
+use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use gpui::Rgba;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+use crate::settings_store;
+
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static THEME: OnceLock<Theme> = OnceLock::new();
+static THEMES: OnceLock<ThemeSet> = OnceLock::new();
+static THEME_CACHE: OnceLock<RwLock<HashMap<String, Theme>>> = OnceLock::new();
 
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
-fn theme() -> &'static Theme {
-    THEME.get_or_init(|| {
-        let mut set = ThemeSet::load_defaults();
-        // base16-ocean.dark sits closest to the React frontend's palette;
-        // fall back to whatever default is available.
-        set.themes
-            .remove("base16-ocean.dark")
-            .or_else(|| set.themes.remove("base16-eighties.dark"))
-            .or_else(|| set.themes.remove("Solarized (dark)"))
-            .unwrap_or_default()
-    })
+fn themes() -> &'static ThemeSet {
+    THEMES.get_or_init(ThemeSet::load_defaults)
+}
+
+/// Look up a theme by name from the bundled set, cloning it once into a
+/// process-wide cache. Falls back to base16-ocean.dark, then to the
+/// default empty theme.
+fn theme_for_name(name: &str) -> Theme {
+    let cache = THEME_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(t) = cache.read().unwrap().get(name).cloned() {
+        return t;
+    }
+    let set = themes();
+    let theme = set
+        .themes
+        .get(name)
+        .cloned()
+        .or_else(|| set.themes.get("base16-ocean.dark").cloned())
+        .or_else(|| set.themes.get("base16-eighties.dark").cloned())
+        .unwrap_or_default();
+    cache
+        .write()
+        .unwrap()
+        .insert(name.to_string(), theme.clone());
+    theme
 }
 
 /// Result of highlighting a single line.
@@ -54,7 +72,9 @@ pub fn highlight_line(content: &str, extension: &str) -> HighlightedLine {
         .find_syntax_by_extension(extension)
         .unwrap_or_else(|| set.find_syntax_plain_text());
 
-    let mut highlighter = HighlightLines::new(syntax, theme());
+    let theme_name = settings_store::snapshot().syntax_theme;
+    let theme = theme_for_name(&theme_name);
+    let mut highlighter = HighlightLines::new(syntax, &theme);
     let ranges = match highlighter.highlight_line(content, set) {
         Ok(r) => r,
         Err(_) => return HighlightedLine::default(),

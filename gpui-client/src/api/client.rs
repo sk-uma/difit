@@ -71,6 +71,38 @@ impl ApiClient {
         self.post_json("/api/comments", query, &Payload { threads })
     }
 
+    /// Fetch raw file content at a given ref. Used to expand context lines
+    /// around diff chunks.
+    pub fn fetch_blob(&self, path: String, git_ref: String) -> oneshot::Receiver<Result<Vec<u8>>> {
+        let (tx, rx) = oneshot::channel();
+        let url = match self.base_url.join(&format!("/api/blob/{path}")) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!(e).context("invalid blob url")));
+                return rx;
+            }
+        };
+        let mut url = url;
+        url.set_query(Some(&format!("ref={git_ref}")));
+        let http = self.http.clone();
+        self.runtime.spawn(async move {
+            let result = async {
+                let resp = http
+                    .get(url.clone())
+                    .send()
+                    .await
+                    .with_context(|| format!("GET {url}"))?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!("GET {url} failed: HTTP {}", resp.status().as_u16()));
+                }
+                Ok(resp.bytes().await?.to_vec())
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
     /// Ask the server to launch the configured editor at `file_path:line`.
     pub fn open_in_editor(
         &self,

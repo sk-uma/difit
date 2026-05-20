@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::api::types::{DiffCommentThread, DiffFile};
-use crate::ui::actions::{DiffAction, DiffActions};
+use crate::ui::actions::{DiffAction, DiffActions, ExpandDirection};
 use crate::ui::comment_card::render_thread;
 use crate::ui::diff_rows::{CommentAnchor, DiffRow, RenderedCell};
 use crate::ui::theme::{Theme, MONO_FONT};
@@ -37,6 +37,7 @@ pub fn render_diff(
     file: Option<&DiffFile>,
     rendered: Option<RenderedDiff>,
     thread_count_for_file: usize,
+    font_size: f32,
     actions: DiffActions,
 ) -> impl IntoElement {
     let container = div()
@@ -49,7 +50,7 @@ pub fn render_diff(
         .bg(Theme::BG)
         .text_color(Theme::TEXT)
         .font_family(MONO_FONT)
-        .text_size(px(12.5));
+        .text_size(px(font_size));
 
     let Some(file) = file else {
         return container.child(empty_placeholder("Select a file to see its diff"));
@@ -105,7 +106,48 @@ fn render_row(row: &DiffRow, ix: usize, actions: &DiffActions) -> AnyElement {
             split_row(left.as_ref(), right.as_ref(), ix, actions).into_any_element()
         }
         DiffRow::Comment(thread) => render_thread(thread, actions).into_any_element(),
+        DiffRow::Expand {
+            chunk_idx,
+            direction,
+            label,
+        } => expand_row(*chunk_idx, *direction, label.clone(), ix, actions).into_any_element(),
     }
+}
+
+fn expand_row(
+    chunk_idx: usize,
+    direction: ExpandDirection,
+    label: SharedString,
+    ix: usize,
+    actions: &DiffActions,
+) -> impl IntoElement {
+    let actions = actions.clone();
+    div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "expand-{ix}-{}",
+            match direction {
+                ExpandDirection::Above => "above",
+                ExpandDirection::Below => "below",
+            }
+        ))))
+        .w_full()
+        .px_3()
+        .py_1()
+        .bg(Theme::DIFF_HUNK_BG)
+        .text_color(Theme::TEXT_LINK)
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG_HOVER))
+        .on_click(move |_e, window, cx| {
+            actions(
+                DiffAction::ExpandContext {
+                    chunk_idx,
+                    direction,
+                },
+                window,
+                cx,
+            )
+        })
+        .child(label)
 }
 
 fn hunk_header(header: SharedString) -> impl IntoElement {
