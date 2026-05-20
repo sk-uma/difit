@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod comment_card;
 pub mod compose_bar;
 pub mod diff_rows;

@@ -140,6 +140,20 @@ impl TextInput {
         self.is_selecting = false;
     }
 
+    /// Set the editor content programmatically. Cursor is moved to the end.
+    pub fn set_content(&mut self, text: &str) {
+        let text = if self.mode == InputMode::SingleLine {
+            text.replace('\n', " ")
+        } else {
+            text.to_string()
+        };
+        let len = text.len();
+        self.content = SharedString::from(text);
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.focus_handle, cx);
     }

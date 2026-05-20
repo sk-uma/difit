@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
@@ -69,6 +69,22 @@ impl ApiClient {
             threads: Vec<DiffCommentThread>,
         }
         self.post_json("/api/comments", query, &Payload { threads })
+    }
+
+    /// Ask the server to launch the configured editor at `file_path:line`.
+    pub fn open_in_editor(
+        &self,
+        file_path: String,
+        line: Option<u32>,
+    ) -> oneshot::Receiver<Result<()>> {
+        #[derive(Serialize)]
+        struct Payload {
+            #[serde(rename = "filePath")]
+            file_path: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            line: Option<u32>,
+        }
+        self.post_json("/api/open-in-editor", &EmptyQuery, &Payload { file_path, line })
     }
 
     /// Subscribe to `/api/watch`. Returns an mpsc receiver yielding parsed

@@ -20,11 +20,20 @@ use crate::ui::theme::Theme;
 
 pub type HighlightSpans = Arc<Vec<(Range<usize>, HighlightStyle)>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommentAnchor {
+    pub side: DiffSide,
+    pub line: u32,
+}
+
 /// A fully-rendered single line ready for the GPUI layer.
 #[derive(Clone)]
 pub struct RenderedCell {
     pub bg: Rgba,
     pub line_number: Option<u32>,
+    /// Where a comment posted from this row should be anchored. `None` for
+    /// non-anchorable rows (e.g. empty buddy cell in split view).
+    pub anchor: Option<CommentAnchor>,
     pub marker: &'static str,
     pub text: SharedString,
     pub highlights: HighlightSpans,
@@ -100,8 +109,10 @@ fn build_split_chunk(
             let left_src = del_buf.get(i).copied();
             let right_src = add_buf.get(i).copied();
             rows.push(DiffRow::Split {
-                left: left_src.map(|l| render_split_cell(l, extension, Theme::DIFF_DEL_BG)),
-                right: right_src.map(|l| render_split_cell(l, extension, Theme::DIFF_ADD_BG)),
+                left: left_src
+                    .map(|l| render_split_cell(l, extension, Theme::DIFF_DEL_BG, DiffSide::Old)),
+                right: right_src
+                    .map(|l| render_split_cell(l, extension, Theme::DIFF_ADD_BG, DiffSide::New)),
             });
             if let Some(l) = left_src {
                 push_anchored_comments(rows, l, comments);
@@ -120,19 +131,9 @@ fn build_split_chunk(
             LineType::Add => add_buf.push(line),
             LineType::Normal | LineType::Context => {
                 flush(rows, &mut del_buf, &mut add_buf, extension, comments);
-                let left = render_split_cell(line, extension, Theme::BG);
-                // Context: same line both sides. Reuse the cell on the right
-                // (cheap because text/highlights are Arc-shared anyway).
-                let right = RenderedCell {
-                    line_number: line.new_line_number,
-                    ..left.clone()
-                };
                 rows.push(DiffRow::Split {
-                    left: Some(RenderedCell {
-                        line_number: line.old_line_number,
-                        ..left
-                    }),
-                    right: Some(right),
+                    left: Some(render_split_cell(line, extension, Theme::BG, DiffSide::Old)),
+                    right: Some(render_split_cell(line, extension, Theme::BG, DiffSide::New)),
                 });
                 // For context only anchor once (otherwise the same comment
                 // would appear twice — once per side).
@@ -152,21 +153,45 @@ fn render_unified_cell(line: &DiffLine, extension: &str) -> RenderedCell {
         LineType::Normal | LineType::Context => (Theme::BG, " ", true),
     };
     let (text, highlights) = bake_text(&line.content, extension, do_highlight);
+    let anchor = unified_anchor(line);
     RenderedCell {
         bg,
         line_number: line.new_line_number.or(line.old_line_number),
+        anchor,
         marker,
         text,
         highlights,
     }
 }
 
-fn render_split_cell(line: &DiffLine, extension: &str, bg: Rgba) -> RenderedCell {
+fn unified_anchor(line: &DiffLine) -> Option<CommentAnchor> {
+    match line.kind {
+        LineType::Delete | LineType::Remove => line.old_line_number.map(|n| CommentAnchor {
+            side: DiffSide::Old,
+            line: n,
+        }),
+        LineType::Add | LineType::Normal | LineType::Context => {
+            line.new_line_number.map(|n| CommentAnchor {
+                side: DiffSide::New,
+                line: n,
+            })
+        }
+        LineType::Hunk | LineType::Header => None,
+    }
+}
+
+fn render_split_cell(line: &DiffLine, extension: &str, bg: Rgba, side: DiffSide) -> RenderedCell {
     let do_highlight = !matches!(line.kind, LineType::Hunk | LineType::Header);
     let (text, highlights) = bake_text(&line.content, extension, do_highlight);
+    let line_no = match side {
+        DiffSide::Old => line.old_line_number,
+        DiffSide::New => line.new_line_number,
+    };
+    let anchor = line_no.map(|n| CommentAnchor { side, line: n });
     RenderedCell {
         bg,
-        line_number: line.new_line_number.or(line.old_line_number),
+        line_number: line_no,
+        anchor,
         marker: "",
         text,
         highlights,
