@@ -1,21 +1,26 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, IntoElement, ParentElement, SharedString, Styled,
-    Window,
+    div, prelude::*, px, App, Context, Entity, IntoElement, ListAlignment, ListState,
+    ParentElement, SharedString, Styled, Window,
 };
 
 use crate::api::client::{CommentSelectionQuery, DiffQuery, WatchEvent};
 use crate::api::types::{DiffCommentThread, DiffResponse, RevisionsResponse};
 use crate::api::ApiClient;
-use crate::ui::diff_view::{render_diff, DiffViewMode};
+use crate::ui::diff_rows::{build_rows, DiffRow};
+use crate::ui::diff_view::{count_threads_for_file, render_diff, DiffViewMode, RenderedDiff};
 use crate::ui::file_list::render_file_list;
 use crate::ui::revision_picker::{render_revision_picker, RevisionRole};
 use crate::ui::theme::{Theme, UI_FONT};
 
 pub struct DifitApp {
     api: Arc<ApiClient>,
-    diff: Option<DiffResponse>,
+    diff: Option<Arc<DiffResponse>>,
+    /// Bumped every time `diff` is replaced. Lets the rendered-rows cache
+    /// notice that the underlying diff has changed even when the file path
+    /// and view mode haven't.
+    diff_generation: u64,
     selected: Option<usize>,
     status: SharedString,
     view_mode: DiffViewMode,
@@ -24,8 +29,23 @@ pub struct DifitApp {
     target_picker_open: bool,
     selected_base: Option<String>,
     selected_target: Option<String>,
-    comments: Vec<DiffCommentThread>,
+    comments: Arc<Vec<DiffCommentThread>>,
     comments_version: u64,
+    rendered_cache: Option<RenderedCacheEntry>,
+}
+
+#[derive(PartialEq, Eq, Clone)]
+struct RenderedCacheKey {
+    file_path: String,
+    view_mode: DiffViewMode,
+    diff_generation: u64,
+    comments_version: u64,
+}
+
+struct RenderedCacheEntry {
+    key: RenderedCacheKey,
+    rows: Arc<Vec<DiffRow>>,
+    list_state: ListState,
 }
 
 impl DifitApp {
@@ -33,6 +53,7 @@ impl DifitApp {
         let view = cx.new(|_cx| Self {
             api: api.clone(),
             diff: None,
+            diff_generation: 0,
             selected: None,
             status: SharedString::from("Loading…"),
             view_mode: DiffViewMode::Unified,
@@ -41,8 +62,9 @@ impl DifitApp {
             target_picker_open: false,
             selected_base: None,
             selected_target: None,
-            comments: Vec::new(),
+            comments: Arc::new(Vec::new()),
             comments_version: 0,
+            rendered_cache: None,
         });
 
         view.update(cx, |this, cx| {
@@ -52,61 +74,6 @@ impl DifitApp {
             this.start_live_updates(cx);
         });
         view
-    }
-
-    fn start_live_updates(&mut self, cx: &mut Context<Self>) {
-        self.api.start_heartbeat();
-        let mut rx = self.api.watch_stream();
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = rx.recv().await {
-                let updated = this.update(cx, |this, cx| match event {
-                    WatchEvent::FilesChanged => {
-                        log::info!("watch: filesChanged → refreshing diff");
-                        this.refresh_diff(cx);
-                    }
-                    WatchEvent::CommentsChanged { version } => {
-                        if version > this.comments_version {
-                            log::info!("watch: commentsChanged v={version} → refetching");
-                            this.refresh_comments(cx);
-                        }
-                    }
-                    WatchEvent::Other(payload) => {
-                        log::debug!("watch: unhandled event {payload}");
-                    }
-                });
-                if updated.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn refresh_comments(&mut self, cx: &mut Context<Self>) {
-        let query = CommentSelectionQuery {
-            base: self.selected_base.clone(),
-            target: self.selected_target.clone(),
-            base_mode: None,
-        };
-        let rx = self.api.fetch_comments(&query);
-        cx.spawn(async move |this, cx| {
-            let result = rx.await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(payload)) => {
-                        this.comments = payload.threads;
-                        this.comments_version = payload.version;
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("comments fetch failed: {e:#}");
-                    }
-                    Err(_) => {}
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn refresh_diff(&mut self, cx: &mut Context<Self>) {
@@ -126,8 +93,6 @@ impl DifitApp {
                             short_commit(&diff),
                             diff.files.len()
                         );
-                        // Mirror server-resolved selection so the picker labels
-                        // stay in sync with what's actually being shown.
                         if let Some(base) = diff
                             .base_commitish
                             .clone()
@@ -142,33 +107,15 @@ impl DifitApp {
                         {
                             this.selected_target = Some(target);
                         }
-                        this.diff = Some(diff);
-                        // Comments are scoped to the (base, target) pair, so
-                        // refetch whenever the diff selection lands somewhere
-                        // new.
+                        let file_count = diff.files.len();
+                        this.diff = Some(Arc::new(diff));
+                        this.diff_generation = this.diff_generation.wrapping_add(1);
+                        this.rendered_cache = None;
                         this.refresh_comments(cx);
                         this.selected = match this.selected {
-                            Some(i)
-                                if this
-                                    .diff
-                                    .as_ref()
-                                    .map(|d| i < d.files.len())
-                                    .unwrap_or(false) =>
-                            {
-                                Some(i)
-                            }
-                            _ => {
-                                if this
-                                    .diff
-                                    .as_ref()
-                                    .map(|d| !d.files.is_empty())
-                                    .unwrap_or(false)
-                                {
-                                    Some(0)
-                                } else {
-                                    None
-                                }
-                            }
+                            Some(i) if i < file_count => Some(i),
+                            _ if file_count > 0 => Some(0),
+                            _ => None,
                         };
                         this.status = SharedString::from(summary);
                     }
@@ -208,6 +155,62 @@ impl DifitApp {
         .detach();
     }
 
+    fn refresh_comments(&mut self, cx: &mut Context<Self>) {
+        let query = CommentSelectionQuery {
+            base: self.selected_base.clone(),
+            target: self.selected_target.clone(),
+            base_mode: None,
+        };
+        let rx = self.api.fetch_comments(&query);
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(payload)) => {
+                        this.comments = Arc::new(payload.threads);
+                        this.comments_version = payload.version;
+                        this.rendered_cache = None;
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("comments fetch failed: {e:#}");
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_live_updates(&mut self, cx: &mut Context<Self>) {
+        self.api.start_heartbeat();
+        let mut rx = self.api.watch_stream();
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = rx.recv().await {
+                let updated = this.update(cx, |this, cx| match event {
+                    WatchEvent::FilesChanged => {
+                        log::info!("watch: filesChanged → refreshing diff");
+                        this.refresh_diff(cx);
+                    }
+                    WatchEvent::CommentsChanged { version } => {
+                        if version > this.comments_version {
+                            log::info!("watch: commentsChanged v={version} → refetching");
+                            this.refresh_comments(cx);
+                        }
+                    }
+                    WatchEvent::Other(payload) => {
+                        log::debug!("watch: unhandled event {payload}");
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn pick_revision(&mut self, role: RevisionRole, value: String, cx: &mut Context<Self>) {
         match role {
             RevisionRole::Base => self.selected_base = Some(value),
@@ -217,6 +220,44 @@ impl DifitApp {
         self.target_picker_open = false;
         self.refresh_diff(cx);
         cx.notify();
+    }
+
+    /// Return the RenderedDiff for the currently selected file, building (or
+    /// refreshing) the cache if needed. This is the hot path's only heavy
+    /// step, and only runs when the cache key changes.
+    fn ensure_rendered(&mut self) -> Option<RenderedDiff> {
+        let diff = self.diff.as_ref()?;
+        let idx = self.selected?;
+        let file = diff.files.get(idx)?;
+
+        let key = RenderedCacheKey {
+            file_path: file.path.clone(),
+            view_mode: self.view_mode,
+            diff_generation: self.diff_generation,
+            comments_version: self.comments_version,
+        };
+
+        let needs_rebuild = self
+            .rendered_cache
+            .as_ref()
+            .map(|c| c.key != key)
+            .unwrap_or(true);
+
+        if needs_rebuild {
+            let rows = build_rows(file, self.view_mode, self.comments.as_ref());
+            let item_count = rows.len();
+            let list_state = ListState::new(item_count, ListAlignment::Top, px(400.0));
+            self.rendered_cache = Some(RenderedCacheEntry {
+                key,
+                rows: Arc::new(rows),
+                list_state,
+            });
+        }
+
+        self.rendered_cache.as_ref().map(|c| RenderedDiff {
+            rows: c.rows.clone(),
+            list_state: c.list_state.clone(),
+        })
     }
 }
 
@@ -241,31 +282,32 @@ fn short_commit(diff: &DiffResponse) -> String {
 
 impl Render for DifitApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let files = self
-            .diff
-            .as_ref()
-            .map(|d| d.files.clone())
-            .unwrap_or_default();
-        let selected = self.selected;
-        let active_file = selected.and_then(|i| files.get(i).cloned());
+        // Snapshot lightweight state up-front; heavy data stays behind Arcs.
         let view_mode = self.view_mode;
-        let comments_for_file: Vec<DiffCommentThread> = active_file
-            .as_ref()
-            .map(|f| {
-                self.comments
-                    .iter()
-                    .filter(|t| t.file_path == f.path)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
         let revisions = self.revisions.clone();
         let selected_base = self.selected_base.clone();
         let selected_target = self.selected_target.clone();
         let base_open = self.base_picker_open;
         let target_open = self.target_picker_open;
+        let status = self.status.clone();
+
+        let rendered = self.ensure_rendered();
+        let diff = self.diff.clone();
+        let selected = self.selected;
+        let comments = self.comments.clone();
 
         let entity = cx.entity();
+
+        // Avoid cloning the entire file list every frame — borrow it for
+        // file_list rendering and active_file lookup via the same Arc.
+        let files: &[crate::api::types::DiffFile] = diff
+            .as_ref()
+            .map(|d| d.files.as_slice())
+            .unwrap_or(&[]);
+        let active_file = selected.and_then(|i| files.get(i));
+        let thread_count = active_file
+            .map(|f| count_threads_for_file(&f.path, comments.iter()))
+            .unwrap_or(0);
 
         div()
             .size_full()
@@ -275,7 +317,7 @@ impl Render for DifitApp {
             .text_color(Theme::TEXT)
             .font_family(UI_FONT)
             .child(render_header(HeaderInputs {
-                status: self.status.clone(),
+                status,
                 view_mode,
                 revisions,
                 selected_base,
@@ -290,17 +332,14 @@ impl Render for DifitApp {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(render_file_list(&files, selected, move |idx, cx| {
+                    .child(render_file_list(files, selected, move |idx, cx| {
                         entity.update(cx, |this, cx| {
                             this.selected = Some(idx);
+                            this.rendered_cache = None;
                             cx.notify();
                         });
                     }))
-                    .child(render_diff(
-                        active_file.as_ref(),
-                        view_mode,
-                        &comments_for_file,
-                    )),
+                    .child(render_diff(active_file, rendered, thread_count)),
             )
     }
 }
@@ -412,6 +451,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
             move |cx: &mut App| {
                 entity.update(cx, |this, cx| {
                     this.view_mode = this.view_mode.toggle();
+                    this.rendered_cache = None;
                     cx.notify();
                 });
             }

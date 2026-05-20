@@ -1,13 +1,13 @@
+use std::sync::Arc;
+
 use gpui::{
-    div, prelude::*, px, AnyElement, HighlightStyle, IntoElement, ParentElement, Rgba,
-    SharedString, Styled, StyledText,
+    div, list, px, AnyElement, IntoElement, ListState, ParentElement, SharedString, Styled,
+    StyledText,
 };
 
-use crate::api::types::{
-    DiffChunk, DiffCommentThread, DiffFile, DiffLine, DiffLineRange, DiffSide, LineType,
-};
-use crate::highlighting::{extension_for_path, highlight_line};
+use crate::api::types::{DiffCommentThread, DiffFile};
 use crate::ui::comment_card::render_thread;
+use crate::ui::diff_rows::{DiffRow, RenderedCell};
 use crate::ui::theme::{Theme, MONO_FONT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,97 +34,159 @@ impl DiffViewMode {
 
 pub fn render_diff(
     file: Option<&DiffFile>,
-    mode: DiffViewMode,
-    comments: &[DiffCommentThread],
+    rendered: Option<RenderedDiff>,
+    thread_count_for_file: usize,
 ) -> impl IntoElement {
-    let mut container = div()
-        .id("diff-scroll")
+    let container = div()
         .flex_1()
         .h_full()
         .min_h_0()
         .min_w_0()
+        .flex()
+        .flex_col()
         .bg(Theme::BG)
         .text_color(Theme::TEXT)
         .font_family(MONO_FONT)
-        .text_size(px(12.5))
-        .overflow_y_scroll();
+        .text_size(px(12.5));
 
     let Some(file) = file else {
         return container.child(empty_placeholder("Select a file to see its diff"));
     };
 
-    container = container.child(file_header(file, comments.len()));
+    let container = container.child(file_header(file, thread_count_for_file));
 
-    if file.chunks.is_empty() {
-        container = container.child(empty_placeholder(
+    let Some(rendered) = rendered else {
+        return container.child(empty_placeholder(
             if file.is_generated.unwrap_or(false) {
                 "Generated file — collapsed by default."
             } else {
                 "No textual diff."
             },
         ));
-        return container;
+    };
+
+    if rendered.rows.is_empty() {
+        return container.child(empty_placeholder(
+            if file.is_generated.unwrap_or(false) {
+                "Generated file — collapsed by default."
+            } else {
+                "No textual diff."
+            },
+        ));
     }
 
-    let extension = extension_for_path(&file.path);
-
-    for chunk in &file.chunks {
-        container = container.child(hunk_header(&chunk.header));
-        match mode {
-            DiffViewMode::Unified => {
-                for line in &chunk.lines {
-                    container = container.child(unified_row(line, &extension));
-                    for thread in threads_anchored_to(line, comments) {
-                        container = container.child(render_thread(thread));
-                    }
-                }
-            }
-            DiffViewMode::Split => {
-                let mut pending_threads: Vec<&DiffCommentThread> = Vec::new();
-                for row in pair_lines_for_split(chunk) {
-                    // Threads on either side of the row should appear under it.
-                    if let Some(line) = row.left_source {
-                        pending_threads.extend(threads_anchored_to(line, comments));
-                    }
-                    if let Some(line) = row.right_source {
-                        pending_threads.extend(threads_anchored_to(line, comments));
-                    }
-                    container = container.child(split_row(row, &extension));
-                    for thread in pending_threads.drain(..) {
-                        container = container.child(render_thread(thread));
-                    }
-                }
-            }
-        }
-    }
-
-    container
+    container.child(virtualized_diff_body(rendered))
 }
 
-fn threads_anchored_to<'a>(
-    line: &DiffLine,
-    threads: &'a [DiffCommentThread],
-) -> impl Iterator<Item = &'a DiffCommentThread> {
-    let old = line.old_line_number;
-    let new = line.new_line_number;
-    let kind = line.kind.clone();
-    threads.iter().filter(move |t| {
-        let (side, anchor) = (t.position.side, anchor_line(&t.position.line));
-        match (side, kind.clone()) {
-            (DiffSide::Old, LineType::Delete | LineType::Remove) => Some(anchor) == old,
-            (DiffSide::New, LineType::Add) => Some(anchor) == new,
-            (DiffSide::Old, LineType::Normal | LineType::Context) => Some(anchor) == old,
-            (DiffSide::New, LineType::Normal | LineType::Context) => Some(anchor) == new,
-            _ => false,
-        }
+#[derive(Clone)]
+pub struct RenderedDiff {
+    pub rows: Arc<Vec<DiffRow>>,
+    pub list_state: ListState,
+}
+
+fn virtualized_diff_body(rendered: RenderedDiff) -> impl IntoElement {
+    let rows = rendered.rows.clone();
+    list(rendered.list_state, move |ix, _window, _cx| {
+        let row = &rows[ix];
+        render_row(row).into_any_element()
     })
+    .flex_1()
+    .min_h_0()
+    .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
 }
 
-fn anchor_line(range: &DiffLineRange) -> u32 {
-    match range {
-        DiffLineRange::Single(n) => *n,
-        DiffLineRange::Range { end, .. } => *end,
+fn render_row(row: &DiffRow) -> AnyElement {
+    match row {
+        DiffRow::HunkHeader(text) => hunk_header(text.clone()).into_any_element(),
+        DiffRow::Unified(cell) => unified_row(cell).into_any_element(),
+        DiffRow::Split { left, right } => split_row(left.as_ref(), right.as_ref()).into_any_element(),
+        DiffRow::Comment(thread) => render_thread(thread).into_any_element(),
     }
+}
+
+fn hunk_header(header: SharedString) -> impl IntoElement {
+    div()
+        .w_full()
+        .bg(Theme::DIFF_HUNK_BG)
+        .px_3()
+        .py_1()
+        .text_color(Theme::DIFF_HUNK_TEXT)
+        .child(header)
+}
+
+fn unified_row(cell: &RenderedCell) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .bg(cell.bg)
+        .child(gutter(line_number_label(cell)))
+        .child(
+            div()
+                .w(px(18.0))
+                .text_color(Theme::TEXT_MUTED)
+                .child(SharedString::from(cell.marker)),
+        )
+        .child(cell_text(cell))
+}
+
+fn split_row(left: Option<&RenderedCell>, right: Option<&RenderedCell>) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .child(split_side(left))
+        .child(div().w(px(1.0)).h_full().bg(Theme::BORDER))
+        .child(split_side(right))
+}
+
+fn split_side(cell: Option<&RenderedCell>) -> impl IntoElement {
+    let bg = cell.map(|c| c.bg).unwrap_or(Theme::BG_HOVER);
+    let mut side = div()
+        .w_1_2()
+        .min_w_0()
+        .flex()
+        .flex_row()
+        .bg(bg);
+
+    if let Some(cell) = cell {
+        side = side
+            .child(gutter(line_number_label(cell)))
+            .child(cell_text(cell));
+    }
+
+    side
+}
+
+fn cell_text(cell: &RenderedCell) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .px_1()
+        .whitespace_nowrap()
+        .child(styled_text(cell))
+}
+
+fn styled_text(cell: &RenderedCell) -> StyledText {
+    if cell.highlights.is_empty() {
+        StyledText::new(cell.text.clone())
+    } else {
+        StyledText::new(cell.text.clone()).with_highlights(cell.highlights.iter().cloned())
+    }
+}
+
+fn gutter(label: SharedString) -> impl IntoElement {
+    div()
+        .w(px(56.0))
+        .px_2()
+        .text_color(Theme::TEXT_MUTED)
+        .child(label)
+}
+
+fn line_number_label(cell: &RenderedCell) -> SharedString {
+    cell.line_number
+        .map(|n| SharedString::from(n.to_string()))
+        .unwrap_or_default()
 }
 
 fn file_header(file: &DiffFile, thread_count: usize) -> impl IntoElement {
@@ -135,6 +197,7 @@ fn file_header(file: &DiffFile, thread_count: usize) -> impl IntoElement {
 
     let mut row = div()
         .w_full()
+        .flex_shrink_0()
         .px_4()
         .py_2()
         .bg(Theme::BG_ELEVATED)
@@ -177,207 +240,6 @@ fn file_header(file: &DiffFile, thread_count: usize) -> impl IntoElement {
     row
 }
 
-fn hunk_header(header: &str) -> impl IntoElement {
-    div()
-        .w_full()
-        .bg(Theme::DIFF_HUNK_BG)
-        .px_3()
-        .py_1()
-        .text_color(Theme::DIFF_HUNK_TEXT)
-        .child(SharedString::from(header.to_string()))
-}
-
-// -- Unified --------------------------------------------------------------
-
-fn unified_row(line: &DiffLine, extension: &str) -> impl IntoElement {
-    let (bg, marker, do_highlight) = match line.kind {
-        LineType::Add => (Theme::DIFF_ADD_BG, "+", true),
-        LineType::Delete | LineType::Remove => (Theme::DIFF_DEL_BG, "-", true),
-        LineType::Hunk | LineType::Header => (Theme::DIFF_HUNK_BG, " ", false),
-        LineType::Normal | LineType::Context => (Theme::BG, " ", true),
-    };
-
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .bg(bg)
-        .child(gutter(line.old_line_number))
-        .child(gutter(line.new_line_number))
-        .child(
-            div()
-                .w(px(18.0))
-                .text_color(Theme::TEXT_MUTED)
-                .child(SharedString::from(marker)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .px_1()
-                .whitespace_nowrap()
-                .child(line_content(&line.content, extension, do_highlight)),
-        )
-}
-
-// -- Split ----------------------------------------------------------------
-
-/// One side of a split row. `None` means the row has no content on that side.
-struct SplitCell {
-    bg: Rgba,
-    line_number: Option<u32>,
-    text: Option<String>,
-    highlight: bool,
-}
-
-struct SplitRow<'a> {
-    left: SplitCell,
-    right: SplitCell,
-    /// Source DiffLine for the left cell, used to anchor comment threads.
-    /// `None` for empty cells; for context rows we set only `left_source`
-    /// (since the same line appears on both sides, it would otherwise
-    /// double-report comments).
-    left_source: Option<&'a DiffLine>,
-    right_source: Option<&'a DiffLine>,
-}
-
-fn empty_cell(bg: Rgba) -> SplitCell {
-    SplitCell {
-        bg,
-        line_number: None,
-        text: None,
-        highlight: false,
-    }
-}
-
-fn pair_lines_for_split(chunk: &DiffChunk) -> Vec<SplitRow<'_>> {
-    let mut rows: Vec<SplitRow<'_>> = Vec::with_capacity(chunk.lines.len());
-    let mut del_buf: Vec<&DiffLine> = Vec::new();
-    let mut add_buf: Vec<&DiffLine> = Vec::new();
-
-    fn flush<'a>(
-        rows: &mut Vec<SplitRow<'a>>,
-        del_buf: &mut Vec<&'a DiffLine>,
-        add_buf: &mut Vec<&'a DiffLine>,
-    ) {
-        let pairs = del_buf.len().max(add_buf.len());
-        for i in 0..pairs {
-            let left_src = del_buf.get(i).copied();
-            let right_src = add_buf.get(i).copied();
-            let left = left_src
-                .map(|l| SplitCell {
-                    bg: Theme::DIFF_DEL_BG,
-                    line_number: l.old_line_number,
-                    text: Some(l.content.clone()),
-                    highlight: true,
-                })
-                .unwrap_or_else(|| empty_cell(Theme::BG_HOVER));
-            let right = right_src
-                .map(|l| SplitCell {
-                    bg: Theme::DIFF_ADD_BG,
-                    line_number: l.new_line_number,
-                    text: Some(l.content.clone()),
-                    highlight: true,
-                })
-                .unwrap_or_else(|| empty_cell(Theme::BG_HOVER));
-            rows.push(SplitRow {
-                left,
-                right,
-                left_source: left_src,
-                right_source: right_src,
-            });
-        }
-        del_buf.clear();
-        add_buf.clear();
-    }
-
-    for line in &chunk.lines {
-        match line.kind {
-            LineType::Delete | LineType::Remove => del_buf.push(line),
-            LineType::Add => add_buf.push(line),
-            LineType::Normal | LineType::Context => {
-                flush(&mut rows, &mut del_buf, &mut add_buf);
-                rows.push(SplitRow {
-                    left: SplitCell {
-                        bg: Theme::BG,
-                        line_number: line.old_line_number,
-                        text: Some(line.content.clone()),
-                        highlight: true,
-                    },
-                    right: SplitCell {
-                        bg: Theme::BG,
-                        line_number: line.new_line_number,
-                        text: Some(line.content.clone()),
-                        highlight: true,
-                    },
-                    left_source: Some(line),
-                    right_source: None,
-                });
-            }
-            LineType::Hunk | LineType::Header => {}
-        }
-    }
-    flush(&mut rows, &mut del_buf, &mut add_buf);
-    rows
-}
-
-fn split_row(row: SplitRow<'_>, extension: &str) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .child(split_side(row.left, extension))
-        .child(div().w(px(1.0)).h_full().bg(Theme::BORDER))
-        .child(split_side(row.right, extension))
-}
-
-fn split_side(cell: SplitCell, extension: &str) -> AnyElement {
-    let mut content_box = div()
-        .flex_1()
-        .px_1()
-        .whitespace_nowrap();
-    if let Some(text) = &cell.text {
-        content_box = content_box.child(line_content(text, extension, cell.highlight));
-    }
-
-    div()
-        .w_1_2()
-        .flex()
-        .flex_row()
-        .bg(cell.bg)
-        .child(gutter(cell.line_number))
-        .child(content_box)
-        .into_any_element()
-}
-
-// -- Shared helpers ------------------------------------------------------
-
-fn line_content(content: &str, extension: &str, highlight: bool) -> StyledText {
-    let display = expand_tabs(content);
-
-    if !highlight || extension.is_empty() {
-        return StyledText::new(display);
-    }
-
-    let highlighted = highlight_line(&display, extension);
-    let highlights: Vec<_> = highlighted
-        .spans
-        .into_iter()
-        .map(|(range, color)| (range, HighlightStyle::from(color)))
-        .collect();
-
-    StyledText::new(display).with_highlights(highlights)
-}
-
-fn gutter(value: Option<u32>) -> impl IntoElement {
-    div()
-        .w(px(56.0))
-        .px_2()
-        .text_color(Theme::TEXT_MUTED)
-        .child(SharedString::from(
-            value.map(|n| n.to_string()).unwrap_or_default(),
-        ))
-}
-
 fn empty_placeholder(msg: &'static str) -> impl IntoElement {
     div()
         .w_full()
@@ -386,6 +248,10 @@ fn empty_placeholder(msg: &'static str) -> impl IntoElement {
         .child(SharedString::from(msg))
 }
 
-fn expand_tabs(s: &str) -> String {
-    s.replace('\t', "    ")
+/// Count comment threads attached to a specific file, for the header badge.
+pub fn count_threads_for_file<'a>(
+    file_path: &str,
+    threads: impl IntoIterator<Item = &'a DiffCommentThread>,
+) -> usize {
+    threads.into_iter().filter(|t| t.file_path == file_path).count()
 }
