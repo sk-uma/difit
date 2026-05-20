@@ -8,6 +8,7 @@ use url::Url;
 
 mod api;
 mod app;
+mod highlighting;
 mod ui;
 
 use crate::api::ApiClient;

@@ -3,10 +3,17 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::Serialize;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 use super::types::{CommentsJsonResponse, DiffResponse, RevisionsResponse};
+
+#[derive(Debug, Clone)]
+pub enum WatchEvent {
+    FilesChanged,
+    CommentsChanged { version: u64 },
+    Other(String),
+}
 
 /// HTTP client targeting a running difit server.
 ///
@@ -34,10 +41,6 @@ impl ApiClient {
         }
     }
 
-    pub fn base_url(&self) -> &Url {
-        &self.base_url
-    }
-
     pub fn fetch_diff(&self, params: DiffQuery) -> oneshot::Receiver<Result<DiffResponse>> {
         self.get_json("/api/diff", &params)
     }
@@ -51,6 +54,65 @@ impl ApiClient {
         query: &CommentSelectionQuery,
     ) -> oneshot::Receiver<Result<CommentsJsonResponse>> {
         self.get_json("/api/comments-json", query)
+    }
+
+    /// Subscribe to `/api/watch`. Returns an mpsc receiver yielding parsed
+    /// events; the underlying task auto-reconnects on transient failure.
+    pub fn watch_stream(&self) -> mpsc::UnboundedReceiver<WatchEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let http = self.http.clone();
+        let url = self.base_url.join("/api/watch");
+        self.runtime.spawn(async move {
+            let url = match url {
+                Ok(u) => u,
+                Err(e) => {
+                    log::error!("invalid /api/watch URL: {e:#}");
+                    return;
+                }
+            };
+            loop {
+                match watch_loop(&http, &url, &tx).await {
+                    Ok(()) => {
+                        log::info!("watch stream closed by server");
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("watch stream error: {e:#}; reconnecting in 2s");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+        rx
+    }
+
+    /// Hold the `/api/heartbeat` connection open for the life of the
+    /// process. Without this, the server shuts down 100ms after the last
+    /// client disconnects (unless launched with `--keep-alive`).
+    pub fn start_heartbeat(&self) {
+        let http = self.http.clone();
+        let url = self.base_url.join("/api/heartbeat");
+        self.runtime.spawn(async move {
+            let url = match url {
+                Ok(u) => u,
+                Err(e) => {
+                    log::error!("invalid /api/heartbeat URL: {e:#}");
+                    return;
+                }
+            };
+            loop {
+                match heartbeat_loop(&http, &url).await {
+                    Ok(()) => {
+                        log::info!("heartbeat closed by server");
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("heartbeat error: {e:#}; reconnecting in 2s");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
     }
 
     fn get_json<Q, T>(&self, path: &str, query: &Q) -> oneshot::Receiver<Result<T>>
@@ -119,6 +181,17 @@ pub struct DiffQuery {
     pub ignore_whitespace: Option<bool>,
 }
 
+impl DiffQuery {
+    pub fn from_selection(base: Option<&str>, target: Option<&str>) -> Self {
+        Self {
+            base: base.map(str::to_string),
+            target: target.map(str::to_string),
+            base_mode: None,
+            ignore_whitespace: None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CommentSelectionQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,3 +204,87 @@ pub struct CommentSelectionQuery {
 
 #[derive(Debug, Default, Clone, Serialize)]
 struct EmptyQuery;
+
+async fn watch_loop(
+    http: &Client,
+    url: &Url,
+    tx: &mpsc::UnboundedSender<WatchEvent>,
+) -> Result<()> {
+    let mut resp = http
+        .get(url.clone())
+        .header("Accept", "text/event-stream")
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    while let Some(chunk) = resp.chunk().await? {
+        buf.extend_from_slice(&chunk);
+        while let Some(idx) = find_event_boundary(&buf) {
+            let raw = buf.drain(..idx + 2).collect::<Vec<u8>>();
+            // The drained bytes still include the trailing "\n\n"; trim it.
+            let raw = &raw[..raw.len() - 2];
+            if let Ok(text) = std::str::from_utf8(raw) {
+                if let Some(event) = parse_sse_event(text) {
+                    if tx.send(event).is_err() {
+                        // Receiver dropped — stop.
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn heartbeat_loop(http: &Client, url: &Url) -> Result<()> {
+    let mut resp = http
+        .get(url.clone())
+        .header("Accept", "text/event-stream")
+        .send()
+        .await?
+        .error_for_status()?;
+    while let Some(_chunk) = resp.chunk().await? {
+        // Drain & discard; the only purpose is to keep the TCP connection
+        // alive so the server doesn't exit.
+    }
+    Ok(())
+}
+
+fn find_event_boundary(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
+}
+
+fn parse_sse_event(text: &str) -> Option<WatchEvent> {
+    // Concatenate all `data:` lines per the SSE spec.
+    let mut data = String::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest.trim_start());
+        }
+    }
+    if data.is_empty() {
+        return None;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EventEnvelope {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+        version: Option<u64>,
+    }
+
+    match serde_json::from_str::<EventEnvelope>(&data) {
+        Ok(env) => match env.kind.as_deref() {
+            Some("filesChanged") => Some(WatchEvent::FilesChanged),
+            Some("commentsChanged") => Some(WatchEvent::CommentsChanged {
+                version: env.version.unwrap_or(0),
+            }),
+            Some(other) => Some(WatchEvent::Other(other.to_string())),
+            None => Some(WatchEvent::Other(data)),
+        },
+        Err(_) => Some(WatchEvent::Other(data)),
+    }
+}

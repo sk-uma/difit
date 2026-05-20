@@ -36,6 +36,7 @@ pub fn render_file_list(
             div()
                 .id("file-list-scroll")
                 .flex_1()
+                .min_h_0()
                 .overflow_y_scroll()
                 .children(files.iter().enumerate().map(|(idx, file)| {
                     let is_selected = Some(idx) == selected;
