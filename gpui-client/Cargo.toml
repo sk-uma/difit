@@ -1,0 +1,42 @@
+[package]
+name = "difit-gpui"
+version = "0.1.0"
+edition = "2021"
+description = "Native GPUI client for the difit diff/review server"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "difit-gpui"
+path = "src/main.rs"
+
+[dependencies]
+# GPUI is pulled from the Zed monorepo. Pin to a known-good rev when you find
+# one that builds in your environment — the upstream branch moves quickly.
+gpui = { git = "https://github.com/zed-industries/zed.git", branch = "main" }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", branch = "main" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+log = "0.4"
+env_logger = "0.11"
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "json",
+  "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+url = "2"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
