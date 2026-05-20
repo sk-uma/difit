@@ -11,6 +11,7 @@ mod app;
 mod highlighting;
 mod ui;
 mod viewed_store;
+mod word_diff;
 
 use crate::api::ApiClient;
 use crate::app::DifitApp;

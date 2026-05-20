@@ -19,6 +19,9 @@ impl Theme {
     // fine for a native renderer).
     pub const DIFF_ADD_BG: Rgba = rgb(0x033a16);
     pub const DIFF_DEL_BG: Rgba = rgb(0x3c0f12);
+    /// Intra-line word-diff highlight, layered on top of the line bg.
+    pub const DIFF_ADD_WORD_BG: Rgba = rgb(0x125c2c);
+    pub const DIFF_DEL_WORD_BG: Rgba = rgb(0x6d1b22);
     pub const DIFF_HUNK_BG: Rgba = rgb(0x1d2733);
     pub const DIFF_HUNK_TEXT: Rgba = rgb(0x7d8590);
 

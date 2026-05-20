@@ -2,14 +2,15 @@
 //!
 //! `build_rows` walks a single `DiffFile` once and produces a flat
 //! `Vec<DiffRow>` where every per-line cost — tab expansion, syntect
-//! highlighting, comment anchoring — has already been paid. The render
-//! pass only has to turn rows into elements, and the virtualized `list`
-//! widget only materializes rows that are actually on screen.
+//! highlighting, comment anchoring, intra-line word diff — has already
+//! been paid. The render pass only has to turn rows into elements, and
+//! the virtualized `list` widget only materializes rows that are
+//! actually on screen.
 
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{HighlightStyle, Rgba, SharedString};
+use gpui::{combine_highlights, HighlightStyle, Rgba, SharedString};
 
 use crate::api::types::{
     DiffCommentThread, DiffFile, DiffLine, DiffLineRange, DiffSide, LineType,
@@ -17,6 +18,7 @@ use crate::api::types::{
 use crate::highlighting::{extension_for_path, highlight_line};
 use crate::ui::diff_view::DiffViewMode;
 use crate::ui::theme::Theme;
+use crate::word_diff::{word_changes, word_highlight};
 
 pub type HighlightSpans = Arc<Vec<(Range<usize>, HighlightStyle)>>;
 
@@ -61,15 +63,16 @@ pub fn build_rows(
     comments: &[DiffCommentThread],
 ) -> Vec<DiffRow> {
     let extension = extension_for_path(&file.path);
-    // Most files produce slightly more rows than lines (hunk headers + a
-    // sprinkling of comment rows). Reserve a small extra margin.
     let line_count: usize = file.chunks.iter().map(|c| c.lines.len()).sum();
-    let mut rows: Vec<DiffRow> = Vec::with_capacity(line_count + file.chunks.len() + comments.len());
+    let mut rows: Vec<DiffRow> =
+        Vec::with_capacity(line_count + file.chunks.len() + comments.len());
 
     for chunk in &file.chunks {
         rows.push(DiffRow::HunkHeader(SharedString::from(chunk.header.clone())));
         match mode {
-            DiffViewMode::Unified => build_unified_chunk(&mut rows, &chunk.lines, &extension, comments),
+            DiffViewMode::Unified => {
+                build_unified_chunk(&mut rows, &chunk.lines, &extension, comments)
+            }
             DiffViewMode::Split => build_split_chunk(&mut rows, &chunk.lines, &extension, comments),
         }
     }
@@ -83,11 +86,56 @@ fn build_unified_chunk(
     extension: &str,
     comments: &[DiffCommentThread],
 ) {
+    let mut del_buf: Vec<&DiffLine> = Vec::new();
+    let mut add_buf: Vec<&DiffLine> = Vec::new();
+
     for line in lines {
-        let cell = render_unified_cell(line, extension);
-        rows.push(DiffRow::Unified(cell));
-        push_anchored_comments(rows, line, comments);
+        match line.kind {
+            LineType::Delete | LineType::Remove => del_buf.push(line),
+            LineType::Add => add_buf.push(line),
+            LineType::Normal | LineType::Context => {
+                flush_unified_pair(rows, &mut del_buf, &mut add_buf, extension, comments);
+                let cell = render_unified_cell(line, extension);
+                rows.push(DiffRow::Unified(cell));
+                push_anchored_comments(rows, line, comments);
+            }
+            LineType::Hunk | LineType::Header => {}
+        }
     }
+    flush_unified_pair(rows, &mut del_buf, &mut add_buf, extension, comments);
+}
+
+fn flush_unified_pair(
+    rows: &mut Vec<DiffRow>,
+    del_buf: &mut Vec<&DiffLine>,
+    add_buf: &mut Vec<&DiffLine>,
+    extension: &str,
+    comments: &[DiffCommentThread],
+) {
+    let mut del_cells: Vec<RenderedCell> = del_buf
+        .iter()
+        .map(|l| render_unified_cell(l, extension))
+        .collect();
+    let mut add_cells: Vec<RenderedCell> = add_buf
+        .iter()
+        .map(|l| render_unified_cell(l, extension))
+        .collect();
+
+    let pairs = del_cells.len().min(add_cells.len());
+    for i in 0..pairs {
+        apply_word_diff_pair(&mut del_cells[i], &mut add_cells[i]);
+    }
+
+    for (i, cell) in del_cells.into_iter().enumerate() {
+        rows.push(DiffRow::Unified(cell));
+        push_anchored_comments(rows, del_buf[i], comments);
+    }
+    for (i, cell) in add_cells.into_iter().enumerate() {
+        rows.push(DiffRow::Unified(cell));
+        push_anchored_comments(rows, add_buf[i], comments);
+    }
+    del_buf.clear();
+    add_buf.clear();
 }
 
 fn build_split_chunk(
@@ -99,50 +147,74 @@ fn build_split_chunk(
     let mut del_buf: Vec<&DiffLine> = Vec::new();
     let mut add_buf: Vec<&DiffLine> = Vec::new();
 
-    let flush = |rows: &mut Vec<DiffRow>,
-                 del_buf: &mut Vec<&DiffLine>,
-                 add_buf: &mut Vec<&DiffLine>,
-                 extension: &str,
-                 comments: &[DiffCommentThread]| {
-        let pairs = del_buf.len().max(add_buf.len());
-        for i in 0..pairs {
-            let left_src = del_buf.get(i).copied();
-            let right_src = add_buf.get(i).copied();
-            rows.push(DiffRow::Split {
-                left: left_src
-                    .map(|l| render_split_cell(l, extension, Theme::DIFF_DEL_BG, DiffSide::Old)),
-                right: right_src
-                    .map(|l| render_split_cell(l, extension, Theme::DIFF_ADD_BG, DiffSide::New)),
-            });
-            if let Some(l) = left_src {
-                push_anchored_comments(rows, l, comments);
-            }
-            if let Some(l) = right_src {
-                push_anchored_comments(rows, l, comments);
-            }
-        }
-        del_buf.clear();
-        add_buf.clear();
-    };
-
     for line in lines {
         match line.kind {
             LineType::Delete | LineType::Remove => del_buf.push(line),
             LineType::Add => add_buf.push(line),
             LineType::Normal | LineType::Context => {
-                flush(rows, &mut del_buf, &mut add_buf, extension, comments);
+                flush_split_pair(rows, &mut del_buf, &mut add_buf, extension, comments);
                 rows.push(DiffRow::Split {
                     left: Some(render_split_cell(line, extension, Theme::BG, DiffSide::Old)),
                     right: Some(render_split_cell(line, extension, Theme::BG, DiffSide::New)),
                 });
-                // For context only anchor once (otherwise the same comment
-                // would appear twice — once per side).
                 push_anchored_comments(rows, line, comments);
             }
             LineType::Hunk | LineType::Header => {}
         }
     }
-    flush(rows, &mut del_buf, &mut add_buf, extension, comments);
+    flush_split_pair(rows, &mut del_buf, &mut add_buf, extension, comments);
+}
+
+fn flush_split_pair(
+    rows: &mut Vec<DiffRow>,
+    del_buf: &mut Vec<&DiffLine>,
+    add_buf: &mut Vec<&DiffLine>,
+    extension: &str,
+    comments: &[DiffCommentThread],
+) {
+    let pairs = del_buf.len().max(add_buf.len());
+    for i in 0..pairs {
+        let left_src = del_buf.get(i).copied();
+        let right_src = add_buf.get(i).copied();
+        let mut left = left_src
+            .map(|l| render_split_cell(l, extension, Theme::DIFF_DEL_BG, DiffSide::Old));
+        let mut right = right_src
+            .map(|l| render_split_cell(l, extension, Theme::DIFF_ADD_BG, DiffSide::New));
+        if let (Some(l), Some(r)) = (left.as_mut(), right.as_mut()) {
+            apply_word_diff_pair(l, r);
+        }
+        rows.push(DiffRow::Split { left, right });
+        if let Some(l) = left_src {
+            push_anchored_comments(rows, l, comments);
+        }
+        if let Some(l) = right_src {
+            push_anchored_comments(rows, l, comments);
+        }
+    }
+    del_buf.clear();
+    add_buf.clear();
+}
+
+/// Compute word-level diff between two cell contents and overlay
+/// background highlights at the changed token ranges.
+fn apply_word_diff_pair(del_cell: &mut RenderedCell, add_cell: &mut RenderedCell) {
+    let (left_ranges, right_ranges) = word_changes(&del_cell.text, &add_cell.text);
+    overlay_word_bg(del_cell, &left_ranges, Theme::DIFF_DEL_WORD_BG);
+    overlay_word_bg(add_cell, &right_ranges, Theme::DIFF_ADD_WORD_BG);
+}
+
+fn overlay_word_bg(cell: &mut RenderedCell, ranges: &[Range<usize>], bg: Rgba) {
+    if ranges.is_empty() {
+        return;
+    }
+    let bg_style = word_highlight(bg.into());
+    let syntax: Vec<(Range<usize>, HighlightStyle)> = (*cell.highlights).clone();
+    let words: Vec<(Range<usize>, HighlightStyle)> = ranges
+        .iter()
+        .map(|r| (r.clone(), bg_style))
+        .collect();
+    let combined: Vec<_> = combine_highlights(syntax, words).collect();
+    cell.highlights = Arc::new(combined);
 }
 
 fn render_unified_cell(line: &DiffLine, extension: &str) -> RenderedCell {
