@@ -18,6 +18,7 @@ use crate::ui::compose_bar::render_compose_bar;
 use crate::ui::diff_rows::{build_rows, expand_step, CommentAnchor, DiffRow, ExpansionMap};
 use crate::ui::diff_view::{count_threads_for_file, render_diff, DiffViewMode, RenderedDiff};
 use crate::ui::file_list::render_file_list;
+use crate::ui::image_viewer::{is_image_ext, render_image_diff};
 use crate::ui::help_modal::render_help_modal;
 use crate::ui::keybindings::{
     Compose, Escape, NextFile, NextRow, OpenInEditor, PrevFile, PrevRow, Refresh, ToggleHelp,
@@ -67,6 +68,20 @@ pub struct DifitApp {
     /// Bumped whenever expansions or blob_cache change; part of the
     /// rendered-rows cache key.
     expansion_version: u64,
+    /// Paths the user has collapsed (in addition to auto-collapsed
+    /// generated files).
+    collapsed: HashSet<String>,
+    /// `/api/generated-status` results cached per (path, ref).
+    generated_cache: HashMap<(String, String), bool>,
+    /// Paths for which we've already evaluated the auto-collapse rule
+    /// against the generated-status result.
+    auto_collapse_done: HashSet<String>,
+    /// Raw bytes for image (and notebook / markdown preview) blobs,
+    /// keyed by (path, ref).
+    image_blob_cache: HashMap<(String, String), Arc<Vec<u8>>>,
+    /// (path, ref) pairs for which an image blob fetch is already in
+    /// flight. Prevents render() from re-issuing the same request.
+    pending_image_fetches: HashSet<(String, String)>,
     /// Index into the current `rendered_cache.rows` for the keyboard-
     /// focused row. Skips non-anchorable rows during j/k navigation.
     selected_row: Option<usize>,
@@ -137,6 +152,11 @@ impl DifitApp {
             expansions: HashMap::new(),
             blob_cache: HashMap::new(),
             expansion_version: 0,
+            collapsed: HashSet::new(),
+            generated_cache: HashMap::new(),
+            auto_collapse_done: HashSet::new(),
+            image_blob_cache: HashMap::new(),
+            pending_image_fetches: HashSet::new(),
             selected_row: None,
             viewed: ViewedStore::load(),
             auto_viewed_done: HashSet::new(),
@@ -197,6 +217,7 @@ impl DifitApp {
                         this.diff_generation = this.diff_generation.wrapping_add(1);
                         this.rendered_cache = None;
                         this.apply_auto_viewed(repo_id.as_deref());
+                        this.fetch_generated_statuses(cx);
                         this.refresh_comments(cx);
                         this.selected = match this.selected {
                             Some(i) if i < file_count => Some(i),
@@ -911,6 +932,151 @@ impl DifitApp {
         cx.notify();
     }
 
+    fn active_image_path_and_refs(&self) -> Option<(String, Option<String>, Option<String>)> {
+        let diff = self.diff.as_ref()?;
+        let idx = self.selected?;
+        let file = diff.files.get(idx)?;
+        let ext = file
+            .path
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !is_image_ext(&ext) {
+            return None;
+        }
+        let old_ref = self.selected_base.clone().filter(|s| !s.is_empty());
+        let new_ref = self.selected_target.clone().filter(|s| !s.is_empty());
+        Some((file.path.clone(), old_ref, new_ref))
+    }
+
+    fn maybe_fetch_image_blobs_for_active(&mut self, cx: &mut Context<Self>) {
+        let Some((path, old_ref, new_ref)) = self.active_image_path_and_refs() else {
+            return;
+        };
+        if let Some(r) = old_ref {
+            self.ensure_image_blob(path.clone(), r, cx);
+        }
+        if let Some(r) = new_ref {
+            self.ensure_image_blob(path, r, cx);
+        }
+    }
+
+    fn active_image_blobs(&self) -> (Option<Arc<Vec<u8>>>, Option<Arc<Vec<u8>>>) {
+        let Some((path, old_ref, new_ref)) = self.active_image_path_and_refs() else {
+            return (None, None);
+        };
+        let old = old_ref.and_then(|r| self.image_blob_cache.get(&(path.clone(), r)).cloned());
+        let new = new_ref.and_then(|r| self.image_blob_cache.get(&(path, r)).cloned());
+        (old, new)
+    }
+
+    fn ensure_image_blob(&mut self, path: String, git_ref: String, cx: &mut Context<Self>) {
+        if git_ref.is_empty()
+            || git_ref == "working"
+            || git_ref == "staged"
+            || git_ref == "."
+        {
+            return;
+        }
+        let key = (path.clone(), git_ref.clone());
+        if self.image_blob_cache.contains_key(&key)
+            || !self.pending_image_fetches.insert(key.clone())
+        {
+            return;
+        }
+        let rx = self.api.fetch_blob(path, git_ref);
+        cx.spawn(async move |this, cx| {
+            match rx.await {
+                Ok(Ok(bytes)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.image_blob_cache.insert(key.clone(), Arc::new(bytes));
+                        this.pending_image_fetches.remove(&key);
+                        cx.notify();
+                    });
+                }
+                _ => {
+                    let _ = this.update(cx, |this, _cx| {
+                        this.pending_image_fetches.remove(&key);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_collapsed_at(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else { return };
+        let Some(file) = diff.files.get(idx) else { return };
+        if self.collapsed.contains(&file.path) {
+            self.collapsed.remove(&file.path);
+        } else {
+            self.collapsed.insert(file.path.clone());
+        }
+        cx.notify();
+    }
+
+    fn fetch_generated_statuses(&mut self, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else { return };
+        let ref_name = self.expansion_ref();
+        let repo_id = diff.repository_id.clone();
+        for file in diff.files.iter() {
+            let key = (file.path.clone(), ref_name.clone());
+            if self.generated_cache.contains_key(&key) {
+                continue;
+            }
+            // Heuristic short-circuit: if the server has already marked
+            // the file as generated by path, treat it that way without
+            // calling the network.
+            if file.is_generated.unwrap_or(false) {
+                self.generated_cache.insert(key.clone(), true);
+                self.apply_generated(&file.path, true, repo_id.as_deref());
+                continue;
+            }
+            let rx = self.api.fetch_generated_status(
+                file.path.clone(),
+                ref_name.clone(),
+            );
+            let key_clone = key.clone();
+            let repo_id_clone = repo_id.clone();
+            cx.spawn(async move |this, cx| {
+                match rx.await {
+                    Ok(Ok(resp)) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.generated_cache.insert(key_clone.clone(), resp.is_generated);
+                            this.apply_generated(
+                                &key_clone.0,
+                                resp.is_generated,
+                                repo_id_clone.as_deref(),
+                            );
+                            cx.notify();
+                        });
+                    }
+                    Ok(Err(e)) => log::debug!("generated-status: {e:#}"),
+                    Err(_) => {}
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn apply_generated(&mut self, path: &str, is_generated: bool, repo_id: Option<&str>) {
+        if !self.auto_collapse_done.insert(path.to_string()) {
+            return;
+        }
+        if !is_generated {
+            return;
+        }
+        self.collapsed.insert(path.to_string());
+        if let Some(repo_id) = repo_id {
+            if !self.viewed.is_viewed(repo_id, path) {
+                self.viewed.set_viewed(repo_id, path, true);
+                if let Err(e) = self.viewed.save() {
+                    log::warn!("viewed save failed: {e:#}");
+                }
+            }
+        }
+    }
+
     fn apply_auto_viewed(&mut self, repo_id: Option<&str>) {
         let Some(repo_id) = repo_id else { return };
         if !self.auto_viewed_done.insert(repo_id.to_string()) {
@@ -1125,6 +1291,12 @@ impl Render for DifitApp {
         let entity = cx.entity();
         let actions = self.build_actions(&entity);
         let viewed_paths: HashSet<String> = self.viewed_paths_for_current_repo();
+        let collapsed_snapshot: HashSet<String> = self.collapsed.clone();
+        // Trigger image blob fetches for the active file if it's an image
+        // and we don't have the bytes yet. Done before borrowing diff
+        // again below so `&mut self` is still available.
+        self.maybe_fetch_image_blobs_for_active(cx);
+        let (active_old_bytes, active_new_bytes) = self.active_image_blobs();
 
         // Avoid cloning the entire file list every frame — borrow it for
         // file_list rendering and active_file lookup via the same Arc.
@@ -1134,6 +1306,9 @@ impl Render for DifitApp {
             .unwrap_or(&[]);
         let active_file = selected.and_then(|i| files.get(i));
         let active_path = active_file.map(|f| f.path.clone());
+        let active_file_collapsed = active_file
+            .map(|f| collapsed_snapshot.contains(&f.path))
+            .unwrap_or(false);
         let thread_count = active_file
             .map(|f| count_threads_for_file(&f.path, comments.iter()))
             .unwrap_or(0);
@@ -1184,6 +1359,7 @@ impl Render for DifitApp {
                         files,
                         selected,
                         &viewed_paths,
+                        &collapsed_snapshot,
                         {
                             let entity = entity.clone();
                             move |idx, cx| {
@@ -1202,12 +1378,21 @@ impl Render for DifitApp {
                                 entity.update(cx, |this, cx| this.toggle_viewed(idx, cx));
                             }
                         },
+                        {
+                            let entity = entity.clone();
+                            move |idx, cx| {
+                                entity.update(cx, |this, cx| this.toggle_collapsed_at(idx, cx));
+                            }
+                        },
                     ))
                     .child(self.render_diff_pane(
                         active_file,
                         rendered,
                         thread_count,
+                        active_file_collapsed,
                         font_size,
+                        active_old_bytes,
+                        active_new_bytes,
                         &entity,
                         actions,
                         cx,
@@ -1307,12 +1492,16 @@ impl Render for DifitApp {
 }
 
 impl DifitApp {
+    #[allow(clippy::too_many_arguments)]
     fn render_diff_pane(
         &self,
         active_file: Option<&crate::api::types::DiffFile>,
         rendered: Option<RenderedDiff>,
         thread_count: usize,
+        collapsed: bool,
         font_size: f32,
+        old_image_bytes: Option<Arc<Vec<u8>>>,
+        new_image_bytes: Option<Arc<Vec<u8>>>,
         entity: &Entity<DifitApp>,
         actions: DiffActions,
         _cx: &mut Context<Self>,
@@ -1322,14 +1511,46 @@ impl DifitApp {
             .min_h_0()
             .min_w_0()
             .flex()
-            .flex_col()
-            .child(render_diff(
-                active_file,
+            .flex_col();
+
+        let viewer_extension = active_file
+            .map(|f| {
+                f.path
+                    .rsplit_once('.')
+                    .map(|(_, e)| e.to_ascii_lowercase())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if let Some(file) = active_file {
+            if !collapsed && is_image_ext(&viewer_extension) {
+                // Image viewer fully replaces the text diff body. We still
+                // render the file header via a slimmer wrapper below.
+                col = col.child(render_image_diff(
+                    file,
+                    &viewer_extension,
+                    old_image_bytes,
+                    new_image_bytes,
+                ));
+            } else {
+                col = col.child(render_diff(
+                    Some(file),
+                    rendered,
+                    thread_count,
+                    collapsed,
+                    font_size,
+                    actions,
+                ));
+            }
+        } else {
+            col = col.child(render_diff(
+                None,
                 rendered,
                 thread_count,
+                collapsed,
                 font_size,
                 actions,
             ));
+        }
 
         if let Some(state) = self.composing.as_ref() {
             let entity_s = entity.clone();

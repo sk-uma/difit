@@ -6,6 +6,7 @@ pub mod diff_rows;
 pub mod diff_view;
 pub mod file_list;
 pub mod help_modal;
+pub mod image_viewer;
 pub mod keybindings;
 pub mod revision_modal;
 pub mod revision_picker;

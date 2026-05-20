@@ -6,7 +6,10 @@ use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-use super::types::{CommentsJsonResponse, DiffCommentThread, DiffResponse, RevisionsResponse};
+use super::types::{
+    CommentsJsonResponse, DiffCommentThread, DiffResponse, GeneratedStatusResponse,
+    RevisionsResponse,
+};
 
 #[derive(Debug, Clone)]
 pub enum WatchEvent {
@@ -69,6 +72,62 @@ impl ApiClient {
             threads: Vec<DiffCommentThread>,
         }
         self.post_json("/api/comments", query, &Payload { threads })
+    }
+
+    /// Ask the server whether a file looks generated (lockfile / minified /
+    /// has a `@generated` marker / etc.). Used for auto-collapsing.
+    pub fn fetch_generated_status(
+        &self,
+        path: String,
+        git_ref: String,
+    ) -> oneshot::Receiver<Result<GeneratedStatusResponse>> {
+        #[derive(Serialize)]
+        struct Query {
+            #[serde(rename = "ref")]
+            r: String,
+        }
+        // The server's path is /api/generated-status/<filepath>. We piggy-back
+        // on `get_json` by encoding the path into the URL ourselves.
+        let (tx, rx) = oneshot::channel();
+        let url = match self.base_url.join(&format!("/api/generated-status/{path}")) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!(e).context("invalid generated-status url")));
+                return rx;
+            }
+        };
+        let mut url = url;
+        let qs = match serde_urlencoded::to_string(Query { r: git_ref }) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!(e).context("encoding query")));
+                return rx;
+            }
+        };
+        if !qs.is_empty() {
+            url.set_query(Some(&qs));
+        }
+        let http = self.http.clone();
+        self.runtime.spawn(async move {
+            let result = async {
+                let resp = http
+                    .get(url.clone())
+                    .send()
+                    .await
+                    .with_context(|| format!("GET {url}"))?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!("GET {url} failed: HTTP {}", resp.status().as_u16()));
+                }
+                let parsed: GeneratedStatusResponse = resp
+                    .json()
+                    .await
+                    .with_context(|| format!("decoding {url}"))?;
+                Ok(parsed)
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+        rx
     }
 
     /// Fetch raw file content at a given ref. Used to expand context lines

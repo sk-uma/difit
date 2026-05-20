@@ -37,6 +37,7 @@ pub fn render_diff(
     file: Option<&DiffFile>,
     rendered: Option<RenderedDiff>,
     thread_count_for_file: usize,
+    collapsed: bool,
     font_size: f32,
     actions: DiffActions,
 ) -> impl IntoElement {
@@ -57,6 +58,12 @@ pub fn render_diff(
     };
 
     let container = container.child(file_header(file, thread_count_for_file));
+
+    if collapsed {
+        return container.child(empty_placeholder(
+            "Collapsed. Use the chevron in the sidebar to expand.",
+        ));
+    }
 
     let Some(rendered) = rendered else {
         return container.child(empty_placeholder(

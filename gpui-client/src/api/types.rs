@@ -155,6 +155,18 @@ pub struct DiffCommentThread {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GeneratedStatusResponse {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, rename = "ref")]
+    pub git_ref: String,
+    #[serde(default, rename = "isGenerated")]
+    pub is_generated: bool,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommentsJsonResponse {
     pub version: u64,
     #[serde(default)]
