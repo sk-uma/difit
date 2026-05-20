@@ -6,12 +6,17 @@ use gpui::{
 };
 
 use crate::api::client::{CommentSelectionQuery, DiffQuery, WatchEvent};
-use crate::api::types::{DiffCommentThread, DiffResponse, RevisionsResponse};
+use crate::api::types::{
+    DiffCommentMessage, DiffCommentPosition, DiffCommentThread, DiffLineRange, DiffResponse,
+    DiffSide, RevisionsResponse,
+};
 use crate::api::ApiClient;
+use crate::ui::compose_bar::render_compose_bar;
 use crate::ui::diff_rows::{build_rows, DiffRow};
 use crate::ui::diff_view::{count_threads_for_file, render_diff, DiffViewMode, RenderedDiff};
 use crate::ui::file_list::render_file_list;
 use crate::ui::revision_picker::{render_revision_picker, RevisionRole};
+use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
 
 pub struct DifitApp {
@@ -32,6 +37,14 @@ pub struct DifitApp {
     comments: Arc<Vec<DiffCommentThread>>,
     comments_version: u64,
     rendered_cache: Option<RenderedCacheEntry>,
+    composing: Option<ComposeState>,
+}
+
+struct ComposeState {
+    file_path: String,
+    side: DiffSide,
+    line_input: Entity<TextInput>,
+    body_input: Entity<TextInput>,
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -65,6 +78,7 @@ impl DifitApp {
             comments: Arc::new(Vec::new()),
             comments_version: 0,
             rendered_cache: None,
+            composing: None,
         });
 
         view.update(cx, |this, cx| {
@@ -211,6 +225,117 @@ impl DifitApp {
         .detach();
     }
 
+    fn start_compose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(file_path) = self.current_file_path() else {
+            return;
+        };
+        let line_input = cx.new(|cx| TextInput::new(InputMode::SingleLine, "1", cx));
+        let body_input = cx.new(|cx| TextInput::new(InputMode::MultiLine, "Write a comment…", cx));
+        let body_handle = body_input.read(cx).focus_handle();
+        self.composing = Some(ComposeState {
+            file_path,
+            side: DiffSide::New,
+            line_input,
+            body_input,
+        });
+        window.focus(&body_handle, cx);
+        cx.notify();
+    }
+
+    fn cancel_compose(&mut self, cx: &mut Context<Self>) {
+        self.composing = None;
+        cx.notify();
+    }
+
+    fn toggle_compose_side(&mut self, side: DiffSide, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.composing {
+            state.side = side;
+            cx.notify();
+        }
+    }
+
+    fn submit_compose(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &self.composing else {
+            return;
+        };
+        let line_text = state.line_input.read(cx).content().trim().to_string();
+        let body_text = state.body_input.read(cx).content().trim().to_string();
+
+        let Ok(line) = line_text.parse::<u32>() else {
+            log::warn!("compose: invalid line number {line_text:?}");
+            return;
+        };
+        if line == 0 {
+            log::warn!("compose: line must be ≥ 1");
+            return;
+        }
+        if body_text.is_empty() {
+            log::warn!("compose: empty body");
+            return;
+        }
+
+        let file_path = state.file_path.clone();
+        let side = state.side;
+
+        let id = next_thread_id();
+        let now = String::new(); // server fills in
+        let thread = DiffCommentThread {
+            id: id.clone(),
+            file_path,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            position: DiffCommentPosition {
+                side,
+                line: DiffLineRange::Single(line),
+            },
+            code_snapshot: None,
+            messages: vec![DiffCommentMessage {
+                id,
+                body: body_text,
+                author: None,
+                created_at: now.clone(),
+                updated_at: now,
+            }],
+        };
+
+        let mut threads: Vec<DiffCommentThread> = (*self.comments).clone();
+        threads.push(thread);
+
+        let query = CommentSelectionQuery {
+            base: self.selected_base.clone(),
+            target: self.selected_target.clone(),
+            base_mode: None,
+        };
+        let rx = self.api.post_comments(&query, threads);
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(())) => {
+                        log::info!("compose: posted");
+                        this.composing = None;
+                        // The server broadcasts commentsChanged, so live
+                        // updates will pull the canonical thread list with
+                        // ids and timestamps filled in.
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("compose: post failed: {e:#}");
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn current_file_path(&self) -> Option<String> {
+        let diff = self.diff.as_ref()?;
+        let idx = self.selected?;
+        diff.files.get(idx).map(|f| f.path.clone())
+    }
+
     fn pick_revision(&mut self, role: RevisionRole, value: String, cx: &mut Context<Self>) {
         match role {
             RevisionRole::Base => self.selected_base = Some(value),
@@ -261,6 +386,14 @@ impl DifitApp {
     }
 }
 
+fn next_thread_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("gpui-{nanos:x}")
+}
+
 fn short_commit(diff: &DiffResponse) -> String {
     let target = diff
         .target_commitish
@@ -282,6 +415,8 @@ fn short_commit(diff: &DiffResponse) -> String {
 
 impl Render for DifitApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let can_compose = self.current_file_path().is_some();
+        let composing_active = self.composing.is_some();
         // Snapshot lightweight state up-front; heavy data stays behind Arcs.
         let view_mode = self.view_mode;
         let revisions = self.revisions.clone();
@@ -324,6 +459,8 @@ impl Render for DifitApp {
                 selected_target,
                 base_open,
                 target_open,
+                can_compose,
+                composing_active,
                 entity: entity.clone(),
             }))
             .child(
@@ -332,15 +469,61 @@ impl Render for DifitApp {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(render_file_list(files, selected, move |idx, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.selected = Some(idx);
-                            this.rendered_cache = None;
-                            cx.notify();
-                        });
+                    .child(render_file_list(files, selected, {
+                        let entity = entity.clone();
+                        move |idx, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.selected = Some(idx);
+                                this.rendered_cache = None;
+                                this.composing = None;
+                                cx.notify();
+                            });
+                        }
                     }))
-                    .child(render_diff(active_file, rendered, thread_count)),
+                    .child(self.render_diff_pane(active_file, rendered, thread_count, &entity, cx)),
             )
+    }
+}
+
+impl DifitApp {
+    fn render_diff_pane(
+        &self,
+        active_file: Option<&crate::api::types::DiffFile>,
+        rendered: Option<RenderedDiff>,
+        thread_count: usize,
+        entity: &Entity<DifitApp>,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut col = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(render_diff(active_file, rendered, thread_count));
+
+        if let Some(state) = self.composing.as_ref() {
+            let entity_s = entity.clone();
+            let entity_c = entity.clone();
+            let entity_t = entity.clone();
+            col = col.child(render_compose_bar(
+                SharedString::from(state.file_path.clone()),
+                state.side,
+                state.line_input.clone(),
+                state.body_input.clone(),
+                move |side, cx| {
+                    entity_t.update(cx, |this, cx| this.toggle_compose_side(side, cx));
+                },
+                move |cx| {
+                    entity_s.update(cx, |this, cx| this.submit_compose(cx));
+                },
+                move |cx| {
+                    entity_c.update(cx, |this, cx| this.cancel_compose(cx));
+                },
+            ));
+        }
+
+        col
     }
 }
 
@@ -352,6 +535,8 @@ struct HeaderInputs {
     selected_target: Option<String>,
     base_open: bool,
     target_open: bool,
+    can_compose: bool,
+    composing_active: bool,
     entity: Entity<DifitApp>,
 }
 
@@ -364,6 +549,8 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         selected_target,
         base_open,
         target_open,
+        can_compose,
+        composing_active,
         entity,
     } = inputs;
 
@@ -374,6 +561,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let entity_e = entity.clone();
     let entity_f = entity.clone();
     let entity_g = entity.clone();
+    let entity_h = entity.clone();
 
     div()
         .w_full()
@@ -462,6 +650,44 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
                 entity.update(cx, |this, cx| this.refresh_diff(cx));
             }
         }))
+        .child(compose_header_button(
+            can_compose,
+            composing_active,
+            move |window, cx| {
+                entity_h.update(cx, |this, cx| {
+                    if this.composing.is_some() {
+                        this.cancel_compose(cx);
+                    } else {
+                        this.start_compose(window, cx);
+                    }
+                });
+            },
+        ))
+}
+
+fn compose_header_button(
+    enabled: bool,
+    active: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let label = if active { "Close" } else { "+ Comment" };
+    let mut btn = div()
+        .id("compose-toggle")
+        .px_3()
+        .py_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(if active { Theme::TEXT_LINK } else { Theme::BORDER })
+        .text_size(px(12.0))
+        .text_color(if enabled { Theme::TEXT } else { Theme::TEXT_MUTED })
+        .child(SharedString::from(label));
+    if enabled {
+        btn = btn
+            .cursor_pointer()
+            .hover(|s| s.bg(Theme::BG_HOVER))
+            .on_click(move |_e, window, cx| on_click(window, cx));
+    }
+    btn
 }
 
 fn header_button(

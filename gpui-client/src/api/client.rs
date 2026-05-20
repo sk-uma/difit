@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-use super::types::{CommentsJsonResponse, DiffResponse, RevisionsResponse};
+use super::types::{CommentsJsonResponse, DiffCommentThread, DiffResponse, RevisionsResponse};
 
 #[derive(Debug, Clone)]
 pub enum WatchEvent {
@@ -54,6 +54,21 @@ impl ApiClient {
         query: &CommentSelectionQuery,
     ) -> oneshot::Receiver<Result<CommentsJsonResponse>> {
         self.get_json("/api/comments-json", query)
+    }
+
+    /// Replace the comment session's thread list. The server broadcasts a
+    /// `commentsChanged` event on success so the caller doesn't need to
+    /// refetch directly.
+    pub fn post_comments(
+        &self,
+        query: &CommentSelectionQuery,
+        threads: Vec<DiffCommentThread>,
+    ) -> oneshot::Receiver<Result<()>> {
+        #[derive(Serialize)]
+        struct Payload {
+            threads: Vec<DiffCommentThread>,
+        }
+        self.post_json("/api/comments", query, &Payload { threads })
     }
 
     /// Subscribe to `/api/watch`. Returns an mpsc receiver yielding parsed
@@ -113,6 +128,69 @@ impl ApiClient {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         });
+    }
+
+    fn post_json<Q, B>(
+        &self,
+        path: &str,
+        query: &Q,
+        body: &B,
+    ) -> oneshot::Receiver<Result<()>>
+    where
+        Q: Serialize + Sized,
+        B: Serialize + Sized,
+    {
+        let (tx, rx) = oneshot::channel();
+        let url = match self.base_url.join(path) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!(e).context("invalid url")));
+                return rx;
+            }
+        };
+        let qs = match serde_urlencoded::to_string(query) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!(e).context("encoding query")));
+                return rx;
+            }
+        };
+        let body_bytes = match serde_json::to_vec(body) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!(e).context("encoding body")));
+                return rx;
+            }
+        };
+        let target = if qs.is_empty() {
+            url
+        } else {
+            let mut u = url;
+            u.set_query(Some(&qs));
+            u
+        };
+        let http = self.http.clone();
+        self.runtime.spawn(async move {
+            let result = async {
+                let resp = http
+                    .post(target.clone())
+                    .header("Content-Type", "application/json")
+                    .body(body_bytes)
+                    .send()
+                    .await
+                    .with_context(|| format!("POST {target}"))?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!(
+                        "POST {target} failed: HTTP {}",
+                        resp.status().as_u16()
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+            let _ = tx.send(result);
+        });
+        rx
     }
 
     fn get_json<Q, T>(&self, path: &str, query: &Q) -> oneshot::Receiver<Result<T>>

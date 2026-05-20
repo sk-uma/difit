@@ -1,6 +1,8 @@
 pub mod comment_card;
+pub mod compose_bar;
 pub mod diff_rows;
 pub mod diff_view;
 pub mod file_list;
 pub mod revision_picker;
+pub mod text_input;
 pub mod theme;

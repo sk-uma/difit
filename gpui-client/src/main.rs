@@ -47,6 +47,8 @@ fn main() -> Result<()> {
     let api = Arc::new(ApiClient::new(base_url, runtime_handle));
 
     application().run(move |cx: &mut App| {
+        crate::ui::text_input::bind_keys(cx);
+
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
