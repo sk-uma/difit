@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, px, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ListAlignment, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement,
     SharedString, Styled, Window,
 };
 
@@ -114,9 +114,10 @@ struct ComposeState {
 #[derive(Debug, Clone, Copy)]
 struct ScrollbarDragState {
     start_mouse_y: f32,
-    start_offset_px: f32,
-    /// max_offset / track_space — converts mouse delta to list offset.
-    px_per_drag: f32,
+    start_top_item: f32,
+    /// scroll_range_items / track_space — converts mouse delta to a
+    /// number of items to skip.
+    items_per_drag_px: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1261,15 +1262,15 @@ impl DifitApp {
                 }
                 DiffAction::ScrollbarDragStart {
                     mouse_y,
-                    current_offset_px,
-                    max_offset_px,
+                    start_top_item,
+                    scroll_range_items,
                     track_space_px,
                 } => {
-                    if track_space_px > 0.0 && max_offset_px > 0.0 {
+                    if track_space_px > 0.0 && scroll_range_items > 0.0 {
                         this.scrollbar_drag = Some(ScrollbarDragState {
                             start_mouse_y: mouse_y,
-                            start_offset_px: current_offset_px,
-                            px_per_drag: max_offset_px / track_space_px,
+                            start_top_item,
+                            items_per_drag_px: scroll_range_items / track_space_px,
                         });
                         if let Some(cache) = this.rendered_cache.as_ref() {
                             cache.list_state.scrollbar_drag_started();
@@ -1279,12 +1280,22 @@ impl DifitApp {
                 DiffAction::ScrollbarDragMove { mouse_y } => {
                     let Some(drag) = this.scrollbar_drag else { return };
                     let Some(cache) = this.rendered_cache.as_ref() else { return };
-                    let target = drag.start_offset_px
-                        + (mouse_y - drag.start_mouse_y) * drag.px_per_drag;
-                    let current = -f32::from(cache.list_state.scroll_px_offset_for_scrollbar().y);
-                    let delta = target - current;
-                    if delta.abs() > 0.5 {
-                        cache.list_state.scroll_by(px(delta));
+                    let item_count = cache.rows.len();
+                    if item_count == 0 {
+                        return;
+                    }
+                    let target_item_f = drag.start_top_item
+                        + (mouse_y - drag.start_mouse_y) * drag.items_per_drag_px;
+                    let target = target_item_f
+                        .round()
+                        .clamp(0.0, (item_count.saturating_sub(1)) as f32)
+                        as usize;
+                    let current = cache.list_state.logical_scroll_top().item_ix;
+                    if target != current {
+                        cache.list_state.scroll_to(ListOffset {
+                            item_ix: target,
+                            offset_in_item: px(0.0),
+                        });
                         cx.notify();
                     }
                 }
@@ -1353,6 +1364,12 @@ impl DifitApp {
             };
             let (rows, file_starts) = build_all_rows(&diff, &ctx);
             let item_count = rows.len();
+            // We deliberately do NOT call `measure_all` here — for big
+            // diffs it's noticeably slow. The scrollbar instead estimates
+            // total height from item count, which keeps the thumb at a
+            // stable size as the user scrolls (the trade-off being that
+            // the thumb position is a per-item approximation rather than
+            // pixel-perfect).
             let list_state = ListState::new(item_count, ListAlignment::Top, px(400.0));
             self.rendered_cache = Some(RenderedCacheEntry {
                 key,

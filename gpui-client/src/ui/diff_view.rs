@@ -85,6 +85,7 @@ fn virtualized_body(
     .min_h_0()
     .with_sizing_behavior(gpui::ListSizingBehavior::Infer);
 
+    let row_count = rendered.rows.len();
     div()
         .flex_1()
         .min_h_0()
@@ -92,27 +93,37 @@ fn virtualized_body(
         .flex()
         .flex_row()
         .child(list_el)
-        .child(list_scrollbar(state_for_bar, actions_for_bar))
+        .child(list_scrollbar(state_for_bar, row_count, actions_for_bar))
 }
 
-/// A thin track + thumb scrollbar driven by `ListState`'s scrollbar
-/// helpers. The thumb is draggable; drag state lives in `DifitApp` and
-/// the move/end events fire through `DiffActions` so the math stays in
-/// one place.
-fn list_scrollbar(state: ListState, actions: DiffActions) -> impl IntoElement {
-    let viewport_h = f32::from(state.viewport_bounds().size.height);
-    let max_offset = f32::from(state.max_offset_for_scrollbar().y);
-    let current = f32::from(-state.scroll_px_offset_for_scrollbar().y);
+/// A thin track + thumb scrollbar.
+///
+/// The geometry is row-index based rather than pixel-based: `ListState`
+/// measures heights lazily, so reading `max_offset_for_scrollbar` while
+/// scrolling makes the thumb shrink as new rows are sized. By using
+/// `rows.len()` + `logical_scroll_top().item_ix` we get a stable thumb
+/// size at the cost of pixel-perfect accuracy inside oversized rows
+/// (image / notebook blocks).
+fn list_scrollbar(state: ListState, total_items: usize, actions: DiffActions) -> impl IntoElement {
+    const ESTIMATED_ROW_HEIGHT: f32 = 18.0;
 
-    let (thumb_h, thumb_top, track_space) = if viewport_h > 0.0 && max_offset > 0.0 {
-        let total = viewport_h + max_offset;
-        let h = (viewport_h * viewport_h / total).max(30.0).min(viewport_h);
-        let track_space = viewport_h - h;
-        let fraction = (current / max_offset).clamp(0.0, 1.0);
-        (h, track_space * fraction, track_space)
-    } else {
-        (0.0, 0.0, 0.0)
-    };
+    let viewport_h = f32::from(state.viewport_bounds().size.height);
+    let total = total_items as f32;
+    let top_item = state.logical_scroll_top().item_ix as f32;
+
+    let (thumb_h, thumb_top, track_space, scroll_range) =
+        if viewport_h > 0.0 && total > 1.0 {
+            let visible_items = (viewport_h / ESTIMATED_ROW_HEIGHT).max(1.0).min(total);
+            let scroll_range = (total - visible_items).max(1.0);
+            let h = (viewport_h * (visible_items / total))
+                .max(30.0)
+                .min(viewport_h);
+            let track_space = (viewport_h - h).max(0.0);
+            let fraction = (top_item / scroll_range).clamp(0.0, 1.0);
+            (h, track_space * fraction, track_space, scroll_range)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
 
     // mouse_move / mouse_up handling lives on the app's root div so
     // dragging keeps working even when the cursor leaves the track.
@@ -144,8 +155,8 @@ fn list_scrollbar(state: ListState, actions: DiffActions) -> impl IntoElement {
                         actions_down(
                             DiffAction::ScrollbarDragStart {
                                 mouse_y: f32::from(e.position.y),
-                                current_offset_px: current,
-                                max_offset_px: max_offset,
+                                start_top_item: top_item,
+                                scroll_range_items: scroll_range,
                                 track_space_px: track_space,
                             },
                             window,

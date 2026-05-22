@@ -61,11 +61,13 @@ pub enum DiffAction {
     CopyAllPromptForFile { file_path: String },
     /// Mouse went down on the diff scrollbar thumb. The snapshot lets
     /// the app translate subsequent ScrollbarDragMove events into list
-    /// offsets without re-reading viewport geometry.
+    /// offsets without re-reading viewport geometry. Scrolling is
+    /// row-index based so the thumb stays a stable size without
+    /// `measure_all()`.
     ScrollbarDragStart {
         mouse_y: f32,
-        current_offset_px: f32,
-        max_offset_px: f32,
+        start_top_item: f32,
+        scroll_range_items: f32,
         track_space_px: f32,
     },
     /// Mouse moved while the scrollbar thumb is being dragged.
