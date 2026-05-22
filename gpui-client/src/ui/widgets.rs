@@ -34,6 +34,226 @@ pub fn icon_label(name: &str, label: &'static str) -> impl IntoElement {
         .child(SharedString::from(label))
 }
 
+/// Icon-only header button (18px icon, 8px padding, hover bg).
+pub fn icon_button(
+    id: impl Into<SharedString>,
+    icon_name: &'static str,
+    tooltip: &'static str,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .p_2()
+        .rounded_sm()
+        .text_color(Theme::TEXT_MUTED)
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG_HOVER).text_color(Theme::TEXT))
+        .tooltip(label_tooltip(tooltip))
+        .on_click(move |_e, _w, cx| on_click(cx))
+        .child(icon(icon_name, 16.0, Theme::TEXT_MUTED))
+}
+
+/// Two-segment pill toggle (React's Split | Unified affordance).
+pub fn pill_toggle(
+    id_prefix: &'static str,
+    left_icon: &'static str,
+    left_label: &'static str,
+    right_icon: &'static str,
+    right_label: &'static str,
+    is_right: bool,
+    on_click: impl Fn(&mut App) + 'static + Clone,
+) -> impl IntoElement {
+    let on_left = on_click.clone();
+    let on_right = on_click;
+    div()
+        .flex()
+        .flex_row()
+        .p(px(2.0))
+        .bg(Theme::BG_HOVER)
+        .border_1()
+        .border_color(Theme::BORDER)
+        .rounded_sm()
+        .gap(px(1.0))
+        .child(pill_segment(
+            format!("{id_prefix}-left"),
+            left_icon,
+            left_label,
+            !is_right,
+            move |cx| {
+                if is_right {
+                    on_left(cx);
+                }
+            },
+        ))
+        .child(pill_segment(
+            format!("{id_prefix}-right"),
+            right_icon,
+            right_label,
+            is_right,
+            move |cx| {
+                if !is_right {
+                    on_right(cx);
+                }
+            },
+        ))
+}
+
+fn pill_segment(
+    id: String,
+    icon_name: &'static str,
+    label: &'static str,
+    active: bool,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let bg = if active { Theme::BG } else { Theme::BG_HOVER };
+    let fg = if active { Theme::TEXT } else { Theme::TEXT_MUTED };
+    div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(10.0))
+        .py(px(4.0))
+        .rounded_sm()
+        .bg(bg)
+        .text_color(fg)
+        .text_size(px(11.0))
+        .cursor_pointer()
+        .hover(|s| {
+            if active {
+                s.bg(Theme::BG)
+            } else {
+                s.text_color(Theme::TEXT)
+            }
+        })
+        .on_click(move |_e, _w, cx| on_click(cx))
+        .child(icon(icon_name, 13.0, fg))
+        .child(SharedString::from(label))
+}
+
+/// Checkbox-style toggle with label on the right (React's Ignore
+/// Whitespace control).
+pub fn checkbox(
+    id: impl Into<SharedString>,
+    checked: bool,
+    label: &'static str,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(12.0))
+        .text_color(Theme::TEXT_MUTED)
+        .cursor_pointer()
+        .hover(|s| s.text_color(Theme::TEXT))
+        .on_click(move |_e, _w, cx| on_click(cx))
+        .child(
+            div()
+                .w(px(14.0))
+                .h(px(14.0))
+                .rounded_xs()
+                .border_1()
+                .border_color(if checked { Theme::TEXT_LINK } else { Theme::BORDER })
+                .bg(if checked { Theme::TEXT_LINK } else { Theme::BG })
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(if checked {
+                    icon("check", 10.0, Theme::TEXT).into_any_element()
+                } else {
+                    div().into_any_element()
+                }),
+        )
+        .child(SharedString::from(label))
+}
+
+/// Counter + 90px progress bar showing "viewed / total" files.
+pub fn viewed_progress(viewed: usize, total: usize) -> impl IntoElement {
+    let label = if total > 0 && viewed == total {
+        "All diffs difit-ed!".to_string()
+    } else {
+        format!("{viewed} / {total} files viewed")
+    };
+    let remaining_pct = if total > 0 {
+        ((total - viewed) as f32) / (total as f32) * 100.0
+    } else {
+        0.0
+    };
+    let bar_color = if remaining_pct > 50.0 {
+        Theme::FILE_STATUS_ADD
+    } else if remaining_pct > 20.0 {
+        Theme::FILE_STATUS_MOD
+    } else {
+        Theme::FILE_STATUS_DEL
+    };
+    let fill_width = px(remaining_pct / 100.0 * 90.0);
+
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(Theme::TEXT_MUTED)
+                .child(SharedString::from(label)),
+        )
+        .child(
+            div()
+                .w(px(90.0))
+                .h(px(8.0))
+                .bg(Theme::BG_HOVER)
+                .border_1()
+                .border_color(Theme::BORDER)
+                .rounded_full()
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .right(px(0.0))
+                        .h_full()
+                        .w(fill_width)
+                        .bg(bar_color),
+                ),
+        )
+}
+
+/// "Reviewing: <hash>" badge. Clicking opens the revision detail modal.
+pub fn reviewing_label(
+    commit_text: SharedString,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(SharedString::from("reviewing")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(11.0))
+        .text_color(Theme::TEXT_MUTED)
+        .cursor_pointer()
+        .hover(|s| s.text_color(Theme::TEXT))
+        .on_click(move |_e, _w, cx| on_click(cx))
+        .tooltip(label_tooltip("Revision details"))
+        .child(SharedString::from("Reviewing:"))
+        .child(
+            div()
+                .px(px(6.0))
+                .py(px(1.0))
+                .bg(Theme::BG_HOVER)
+                .rounded_xs()
+                .font_family(crate::ui::theme::MONO_FONT)
+                .text_color(Theme::TEXT)
+                .child(commit_text),
+        )
+}
+
 /// Small hover-bubble view. Returned by `label_tooltip`.
 pub struct TooltipBubble {
     pub text: SharedString,

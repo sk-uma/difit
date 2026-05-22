@@ -31,7 +31,9 @@ use crate::settings_store::{self, Settings};
 use crate::ui::settings_modal::render_settings_modal;
 use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
-use crate::ui::widgets::{label_tooltip, logo, toggle_switch};
+use crate::ui::widgets::{
+    checkbox, icon_button, label_tooltip, logo, pill_toggle, reviewing_label, viewed_progress,
+};
 use crate::viewed_store::{is_auto_viewed, ViewedStore};
 
 pub struct DifitApp {
@@ -72,6 +74,8 @@ pub struct DifitApp {
     ui_version: u64,
     /// In-progress drag of the diff scrollbar thumb.
     scrollbar_drag: Option<ScrollbarDragState>,
+    /// File-tree sidebar visibility (PanelLeft toggle).
+    sidebar_open: bool,
     /// Paths the user has collapsed (in addition to auto-collapsed
     /// generated files).
     collapsed: HashSet<String>,
@@ -179,6 +183,7 @@ impl DifitApp {
             expansion_version: 0,
             ui_version: 0,
             scrollbar_drag: None,
+            sidebar_open: true,
             collapsed: HashSet::new(),
             collapsed_dirs: HashSet::new(),
             file_filter: filter_input.clone(),
@@ -1542,29 +1547,25 @@ impl Render for DifitApp {
             .text_color(Theme::TEXT)
             .font_family(UI_FONT)
             .child(render_header(HeaderInputs {
-                status,
                 view_mode,
-                revisions,
-                selected_base: selected_base.clone(),
-                selected_target: selected_target.clone(),
-                base_open,
-                target_open,
-                can_compose,
-                composing_active,
                 ignore_whitespace,
-                use_merge_base,
-                active_path,
-                file_count,
-                reviewing_text: reviewing_text.clone(),
+                viewed_count: viewed_paths.len(),
+                total_files: file_count,
+                thread_count: comments.len(),
+                commit_text: SharedString::from(
+                    self.diff
+                        .as_ref()
+                        .map(|d| d.commit.clone())
+                        .unwrap_or_default(),
+                ),
+                sidebar_open: self.sidebar_open,
+                sidebar_width: 280.0,
                 entity: entity.clone(),
             }))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h_0()
-                    .child(render_file_list(
+            .child({
+                let mut row = div().flex().flex_row().flex_1().min_h_0();
+                if self.sidebar_open {
+                    row = row.child(render_file_list(
                         files,
                         selected,
                         &viewed_paths,
@@ -1630,9 +1631,10 @@ impl Render for DifitApp {
                                 });
                             }
                         },
-                    ))
-                    .child(self.render_main_column(rendered, font_size, actions, &entity)),
-            )
+                    ));
+                }
+                row.child(self.render_main_column(rendered, font_size, actions, &entity))
+            })
             .child(render_footer());
 
         let root = if show_help {
@@ -1771,251 +1773,204 @@ impl DifitApp {
 }
 
 struct HeaderInputs {
-    status: SharedString,
     view_mode: DiffViewMode,
-    revisions: Option<Arc<RevisionsResponse>>,
-    selected_base: Option<String>,
-    selected_target: Option<String>,
-    base_open: bool,
-    target_open: bool,
-    can_compose: bool,
-    composing_active: bool,
     ignore_whitespace: bool,
-    use_merge_base: bool,
-    active_path: Option<String>,
-    file_count: usize,
-    reviewing_text: String,
+    viewed_count: usize,
+    total_files: usize,
+    thread_count: usize,
+    commit_text: SharedString,
+    sidebar_open: bool,
+    sidebar_width: f32,
     entity: Entity<DifitApp>,
 }
 
 fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let HeaderInputs {
-        status,
         view_mode,
-        revisions,
-        selected_base,
-        selected_target,
-        base_open,
-        target_open,
-        can_compose,
-        composing_active,
         ignore_whitespace,
-        use_merge_base,
-        active_path,
-        file_count,
-        reviewing_text,
+        viewed_count,
+        total_files,
+        thread_count,
+        commit_text,
+        sidebar_open,
+        sidebar_width,
         entity,
     } = inputs;
 
-    let entity_a = entity.clone();
-    let entity_b = entity.clone();
-    let entity_c = entity.clone();
-    let entity_d = entity.clone();
-    let entity_e = entity.clone();
-    let entity_f = entity.clone();
-    let entity_g = entity.clone();
-    let entity_h = entity.clone();
-    let entity_ws = entity.clone();
-    let entity_mb = entity.clone();
-    let entity_open = entity.clone();
-    let entity_copy = entity.clone();
-    let entity_info = entity.clone();
-    let entity_help = entity.clone();
-    let entity_threads = entity.clone();
+    let entity_panel = entity.clone();
     let entity_settings = entity.clone();
-    let entity_preview = entity.clone();
-    let active_is_md = active_path
-        .as_deref()
-        .map(is_markdown_path)
-        .unwrap_or(false);
-    let active_path_for_open = active_path.clone();
-    let active_path_for_copy = active_path;
+    let entity_help = entity.clone();
+    let entity_view = entity.clone();
+    let entity_ws = entity.clone();
+    let entity_refresh = entity.clone();
+    let entity_threads = entity.clone();
+    let entity_review = entity.clone();
 
-    div()
-        .w_full()
-        .h(px(40.0))
-        .px_4()
+    let panel_icon = if sidebar_open {
+        "panel-left"
+    } else {
+        "panel-left"
+    };
+
+    // Left section — sidebar-width column with logo + panel-left + settings.
+    let left_section = div()
+        .px(px(16.0))
+        .py(px(10.0))
         .flex()
         .flex_row()
         .items_center()
-        .gap_3()
-        .bg(Theme::BG_ELEVATED)
-        .border_b_1()
-        .border_color(Theme::BORDER)
+        .justify_between()
+        .gap(px(16.0))
+        .w(px(sidebar_width))
+        .flex_shrink_0()
         .child(logo())
-        .child(render_revision_picker(
-            RevisionRole::Base,
-            selected_base.as_deref(),
-            revisions.as_ref(),
-            base_open,
-            move |cx| {
-                entity_a.update(cx, |this, cx| {
-                    this.base_picker_open = !this.base_picker_open;
-                    this.target_picker_open = false;
-                    cx.notify();
-                });
-            },
-            move |value, cx| {
-                entity_b.update(cx, |this, cx| this.pick_revision(RevisionRole::Base, value, cx));
-            },
-            move |cx| {
-                entity_c.update(cx, |this, cx| {
-                    this.base_picker_open = false;
-                    cx.notify();
-                });
-            },
-        ))
-        .child(render_revision_picker(
-            RevisionRole::Target,
-            selected_target.as_deref(),
-            revisions.as_ref(),
-            target_open,
-            move |cx| {
-                entity_d.update(cx, |this, cx| {
-                    this.target_picker_open = !this.target_picker_open;
-                    this.base_picker_open = false;
-                    cx.notify();
-                });
-            },
-            move |value, cx| {
-                entity_e.update(cx, |this, cx| {
-                    this.pick_revision(RevisionRole::Target, value, cx)
-                });
-            },
-            move |cx| {
-                entity_f.update(cx, |this, cx| {
-                    this.target_picker_open = false;
-                    cx.notify();
-                });
-            },
-        ))
         .child(
             div()
-                .flex_1()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_3()
-                .text_size(px(12.0))
-                .text_color(Theme::TEXT_MUTED)
-                .child(div().child(status))
-                .child(
-                    div().child(SharedString::from(format!("{file_count} files changed"))),
-                )
-                .child(div().child(SharedString::from(reviewing_text))),
-        )
-        .child(toggle_switch(
-            "ws",
-            "Ignore whitespace",
+                .gap(px(2.0))
+                .child(icon_button(
+                    "panel-left-toggle",
+                    panel_icon,
+                    if sidebar_open {
+                        "Collapse file tree"
+                    } else {
+                        "Expand file tree"
+                    },
+                    move |cx: &mut App| {
+                        entity_panel.update(cx, |this, cx| {
+                            this.sidebar_open = !this.sidebar_open;
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(icon_button(
+                    "settings-btn",
+                    "settings",
+                    "Settings",
+                    move |cx: &mut App| {
+                        entity_settings.update(cx, |this, cx| {
+                            this.show_settings_modal = !this.show_settings_modal;
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(icon_button(
+                    "help-btn",
+                    "help",
+                    "Keyboard shortcuts",
+                    move |cx: &mut App| {
+                        entity_help.update(cx, |this, cx| {
+                            this.show_help = !this.show_help;
+                            cx.notify();
+                        });
+                    },
+                )),
+        );
+
+    // Vertical divider matching React's 4px / inset-8px bar.
+    let divider = div()
+        .w(px(1.0))
+        .my(px(8.0))
+        .bg(Theme::BORDER);
+
+    // Right section — split into left cluster (view mode / WS / reload)
+    // and right cluster (threads / viewed progress / reviewing label).
+    let view_is_split = view_mode == DiffViewMode::Split;
+    let entity_view_pill = entity_view.clone();
+    let left_cluster = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .child(pill_toggle(
+            "view-mode-pill",
+            "columns",
+            "Split",
+            "align-left",
+            "Unified",
+            !view_is_split,
+            move |cx: &mut App| {
+                entity_view_pill.update(cx, |this, cx| {
+                    this.view_mode = this.view_mode.toggle();
+                    this.rendered_cache = None;
+                    cx.notify();
+                });
+            },
+        ))
+        .child(checkbox(
+            "ws-checkbox",
             ignore_whitespace,
+            "Ignore Whitespace",
             move |cx: &mut App| {
                 entity_ws.update(cx, |this, cx| this.toggle_ignore_whitespace(cx));
             },
         ))
-        .child(toggle_header_button(
-            "mb",
-            "merge-base",
-            use_merge_base,
+        .child(icon_button(
+            "refresh-btn",
+            "refresh-cw",
+            "Refresh diff",
             move |cx: &mut App| {
-                entity_mb.update(cx, |this, cx| this.toggle_merge_base(cx));
+                entity_refresh.update(cx, |this, cx| this.refresh_diff(cx));
             },
-        ))
-        .child(toggle_switch(
-            "view-mode",
-            "Side by Side",
-            view_mode == DiffViewMode::Split,
-            {
-                let entity = entity_g.clone();
-                move |cx: &mut App| {
-                    entity.update(cx, |this, cx| {
-                        this.view_mode = this.view_mode.toggle();
-                        this.rendered_cache = None;
-                        cx.notify();
-                    });
-                }
-            },
-        ))
-        .child(header_button("refresh", "Refresh", {
-            let entity = entity_g;
+        ));
+
+    let right_cluster_threads: gpui::AnyElement = if thread_count > 0 {
+        icon_button(
+            "threads-btn",
+            "message-square",
+            "All comments",
             move |cx: &mut App| {
-                entity.update(cx, |this, cx| this.refresh_diff(cx));
-            }
-        }))
-        .child(header_button_enabled(
-            "preview",
-            "Preview",
-            active_is_md,
-            move |cx: &mut App| {
-                entity_preview.update(cx, |this, cx| this.toggle_preview_for_active(cx));
-            },
-        ))
-        .child(header_button_enabled(
-            "open-editor",
-            "Open in editor",
-            active_path_for_open.is_some(),
-            move |cx: &mut App| {
-                entity_open.update(cx, |this, cx| this.open_in_editor(None, cx));
-            },
-        ))
-        .child(header_button_enabled(
-            "copy-all",
-            "Copy all",
-            active_path_for_copy.is_some(),
-            move |cx: &mut App| {
-                if let Some(path) = active_path_for_copy.clone() {
-                    entity_copy.update(cx, |this, _cx| this.copy_all_prompts_for_file(&path, _cx));
-                }
-            },
-        ))
-        .child(compose_header_button(
-            can_compose,
-            composing_active,
-            move |window, cx| {
-                entity_h.update(cx, |this, cx| {
-                    if this.composing.is_some() {
-                        this.cancel_compose(cx);
-                    } else {
-                        this.start_compose(window, cx);
-                    }
-                });
-            },
-        ))
-        .child(header_button("comments-list", "Threads", {
-            let entity = entity_threads;
-            move |cx: &mut App| {
-                entity.update(cx, |this, cx| {
+                entity_threads.update(cx, |this, cx| {
                     this.show_comments_list = !this.show_comments_list;
                     cx.notify();
                 });
-            }
-        }))
-        .child(header_button("info", "Info", {
-            let entity = entity_info;
-            move |cx: &mut App| {
-                entity.update(cx, |this, cx| {
-                    this.show_revision_modal = !this.show_revision_modal;
-                    cx.notify();
-                });
-            }
-        }))
-        .child(header_button("settings", "⚙", {
-            let entity = entity_settings;
-            move |cx: &mut App| {
-                entity.update(cx, |this, cx| {
-                    this.show_settings_modal = !this.show_settings_modal;
-                    cx.notify();
-                });
-            }
-        }))
-        .child(header_button("help", "?", {
-            let entity = entity_help;
-            move |cx: &mut App| {
-                entity.update(cx, |this, cx| {
-                    this.show_help = !this.show_help;
-                    cx.notify();
-                });
-            }
-        }))
+            },
+        )
+        .into_any_element()
+    } else {
+        div().into_any_element()
+    };
+
+    let right_cluster = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(16.0))
+        .child(right_cluster_threads)
+        .child(viewed_progress(viewed_count, total_files))
+        .child(reviewing_label(commit_text, move |cx: &mut App| {
+            entity_review.update(cx, |this, cx| {
+                this.show_revision_modal = !this.show_revision_modal;
+                cx.notify();
+            });
+        }));
+
+    let right_section = div()
+        .flex_1()
+        .min_w_0()
+        .px(px(16.0))
+        .py(px(10.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .child(left_cluster)
+        .child(right_cluster);
+
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .bg(Theme::BG_ELEVATED)
+        .border_b_1()
+        .border_color(Theme::BORDER)
+        .child(left_section)
+        .child(divider)
+        .child(right_section)
 }
 
 fn toggle_header_button(
