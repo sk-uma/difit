@@ -1,6 +1,6 @@
-//! Callback plumbing for diff row interactions. Letting the diff/comment
-//! views talk back to `DifitApp` through an opaque `DiffActions` keeps
-//! the UI layer from depending on the app type directly.
+//! Callback plumbing for diff row interactions. Letting the diff /
+//! file-list / comment views talk back to `DifitApp` through an opaque
+//! `DiffActions` keeps the UI layer from depending on the app type.
 
 use std::sync::Arc;
 
@@ -12,9 +12,15 @@ use crate::ui::diff_rows::CommentAnchor;
 #[derive(Debug, Clone)]
 pub enum DiffAction {
     /// User clicked the "+" affordance on a diff row.
-    StartComposeAt(CommentAnchor),
+    StartComposeAt {
+        file_path: String,
+        anchor: CommentAnchor,
+    },
     /// User clicked "Reply" on a thread.
-    StartReply { thread_id: String, anchor: CommentAnchor },
+    StartReply {
+        thread_id: String,
+        anchor: CommentAnchor,
+    },
     /// User clicked "Edit" on a message.
     StartEdit {
         thread_id: String,
@@ -22,8 +28,7 @@ pub enum DiffAction {
         body: String,
         anchor: CommentAnchor,
     },
-    /// User clicked "Delete" on a message. If it's the last message in the
-    /// thread, the thread itself is removed.
+    /// User clicked "Delete" on a message.
     DeleteMessage {
         thread_id: String,
         message_id: String,
@@ -32,14 +37,28 @@ pub enum DiffAction {
     DeleteThread { thread_id: String },
     /// Copy a single thread as a prompt.
     CopyPromptThread { thread_id: String },
-    /// Open the active file in the configured editor at this line.
-    OpenInEditor { side: DiffSide, line: u32 },
-    /// Expand more surrounding context for the given chunk in the
-    /// currently visible file.
+    /// Open `file_path` at a specific line.
+    OpenInEditor {
+        file_path: String,
+        side: DiffSide,
+        line: u32,
+    },
+    /// Expand more surrounding context for a chunk in a file.
     ExpandContext {
+        file_path: String,
         chunk_idx: usize,
         direction: ExpandDirection,
     },
+    /// Toggle file-level state from a FileHeader row.
+    ToggleViewed { file_path: String },
+    ToggleCollapsed { file_path: String },
+    TogglePreview { file_path: String },
+    /// Scroll the main diff list to a file's first row.
+    SelectFile { file_path: String },
+    /// Open the file in the editor (no specific line).
+    OpenFileInEditor { file_path: String },
+    /// Copy all comments for a file.
+    CopyAllPromptForFile { file_path: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

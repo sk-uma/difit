@@ -5,10 +5,13 @@ use gpui::{
     SharedString, Styled, StyledText,
 };
 
-use crate::api::types::{DiffCommentThread, DiffFile};
+use crate::api::types::FileStatus;
 use crate::ui::actions::{DiffAction, DiffActions, ExpandDirection};
 use crate::ui::comment_card::render_thread;
-use crate::ui::diff_rows::{CommentAnchor, DiffRow, RenderedCell};
+use crate::ui::diff_rows::{DiffRow, FileHeaderData, RenderedCell};
+use crate::ui::image_viewer::render_image_diff;
+use crate::ui::markdown_view::render_markdown;
+use crate::ui::notebook_view::render_notebook;
 use crate::ui::theme::{Theme, MONO_FONT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,16 +31,19 @@ impl DiffViewMode {
     pub fn label(self) -> &'static str {
         match self {
             DiffViewMode::Unified => "Unified",
-            DiffViewMode::Split => "Split",
+            DiffViewMode::Split => "Side by Side",
         }
     }
 }
 
-pub fn render_diff(
-    file: Option<&DiffFile>,
+#[derive(Clone)]
+pub struct RenderedDiff {
+    pub rows: Arc<Vec<DiffRow>>,
+    pub list_state: ListState,
+}
+
+pub fn render_main_pane(
     rendered: Option<RenderedDiff>,
-    thread_count_for_file: usize,
-    collapsed: bool,
     font_size: f32,
     actions: DiffActions,
 ) -> impl IntoElement {
@@ -53,108 +59,298 @@ pub fn render_diff(
         .font_family(MONO_FONT)
         .text_size(px(font_size));
 
-    let Some(file) = file else {
-        return container.child(empty_placeholder("Select a file to see its diff"));
-    };
-
-    let container = container.child(file_header(file, thread_count_for_file));
-
-    if collapsed {
-        return container.child(empty_placeholder(
-            "Collapsed. Use the chevron in the sidebar to expand.",
-        ));
-    }
-
     let Some(rendered) = rendered else {
-        return container.child(empty_placeholder(
-            if file.is_generated.unwrap_or(false) {
-                "Generated file — collapsed by default."
-            } else {
-                "No textual diff."
-            },
-        ));
+        return container.child(empty_placeholder("Loading diff…"));
     };
 
     if rendered.rows.is_empty() {
-        return container.child(empty_placeholder(
-            if file.is_generated.unwrap_or(false) {
-                "Generated file — collapsed by default."
-            } else {
-                "No textual diff."
-            },
-        ));
+        return container.child(empty_placeholder("No files in this diff."));
     }
 
-    container.child(virtualized_diff_body(rendered, actions))
+    container.child(virtualized_body(rendered, font_size, actions))
 }
 
-#[derive(Clone)]
-pub struct RenderedDiff {
-    pub rows: Arc<Vec<DiffRow>>,
-    pub list_state: ListState,
-}
-
-fn virtualized_diff_body(rendered: RenderedDiff, actions: DiffActions) -> impl IntoElement {
+fn virtualized_body(
+    rendered: RenderedDiff,
+    font_size: f32,
+    actions: DiffActions,
+) -> impl IntoElement {
     let rows = rendered.rows.clone();
     list(rendered.list_state, move |ix, _window, _cx| {
-        let row = &rows[ix];
-        render_row(row, ix, &actions).into_any_element()
+        render_row(&rows[ix], ix, font_size, &actions).into_any_element()
     })
     .flex_1()
     .min_h_0()
     .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
 }
 
-fn render_row(row: &DiffRow, ix: usize, actions: &DiffActions) -> AnyElement {
+fn render_row(row: &DiffRow, ix: usize, font_size: f32, actions: &DiffActions) -> AnyElement {
     match row {
-        DiffRow::HunkHeader(text) => hunk_header(text.clone()).into_any_element(),
-        DiffRow::Unified(cell) => unified_row(cell, ix, actions).into_any_element(),
-        DiffRow::Split { left, right } => {
-            split_row(left.as_ref(), right.as_ref(), ix, actions).into_any_element()
+        DiffRow::Spacer => div().h(px(8.0)).into_any_element(),
+        DiffRow::FileHeader(data) => render_file_header(data, actions).into_any_element(),
+        DiffRow::HunkHeader { text, .. } => hunk_header(text.clone()).into_any_element(),
+        DiffRow::Unified { file_path, cell } => {
+            unified_row(file_path, cell, ix, actions).into_any_element()
         }
+        DiffRow::Split {
+            file_path,
+            left,
+            right,
+        } => split_row(file_path, left.as_ref(), right.as_ref(), ix, actions).into_any_element(),
         DiffRow::Comment(thread) => render_thread(thread, actions).into_any_element(),
         DiffRow::Expand {
+            file_path,
             chunk_idx,
             direction,
             label,
-        } => expand_row(*chunk_idx, *direction, label.clone(), ix, actions).into_any_element(),
+        } => expand_row(file_path, *chunk_idx, *direction, label.clone(), ix, actions)
+            .into_any_element(),
+        DiffRow::Image {
+            file_path: _,
+            extension,
+            status,
+            old,
+            new,
+        } => render_image_diff(
+            &crate::api::types::DiffFile {
+                path: String::new(), // not used by image_viewer header
+                old_path: None,
+                status: status.clone(),
+                additions: 0,
+                deletions: 0,
+                chunks: Vec::new(),
+                is_generated: None,
+            },
+            extension,
+            old.clone(),
+            new.clone(),
+        )
+        .into_any_element(),
+        DiffRow::Notebook { bytes, .. } => render_notebook(bytes, font_size).into_any_element(),
+        DiffRow::MarkdownPreview { bytes, .. } => {
+            let text = String::from_utf8_lossy(bytes).to_string();
+            render_markdown(&text, font_size).into_any_element()
+        }
     }
 }
 
-fn expand_row(
-    chunk_idx: usize,
-    direction: ExpandDirection,
-    label: SharedString,
-    ix: usize,
-    actions: &DiffActions,
+fn render_file_header(data: &FileHeaderData, actions: &DiffActions) -> impl IntoElement {
+    let path_display = match &data.old_path {
+        Some(old) if old.as_ref() != data.path.as_ref() => {
+            SharedString::from(format!("{} → {}", old, data.path))
+        }
+        _ => data.path.clone(),
+    };
+    let actions_collapse = actions.clone();
+    let actions_viewed = actions.clone();
+    let actions_open = actions.clone();
+    let actions_preview = actions.clone();
+    let actions_copy_all = actions.clone();
+    let path_collapse = data.path.to_string();
+    let path_viewed = data.path.to_string();
+    let path_open = data.path.to_string();
+    let path_preview = data.path.to_string();
+    let path_copy = data.path.to_string();
+
+    let chevron = if data.collapsed { "▶" } else { "▼" };
+
+    let mut row = div()
+        .w_full()
+        .flex_shrink_0()
+        .px_3()
+        .py_2()
+        .bg(Theme::BG_ELEVATED)
+        .border_1()
+        .border_color(Theme::BORDER)
+        .rounded_sm()
+        .mt_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "fh-chevron-{}",
+                    data.file_idx
+                ))))
+                .text_color(Theme::TEXT_MUTED)
+                .cursor_pointer()
+                .hover(|s| s.text_color(Theme::TEXT_LINK))
+                .on_click(move |_e, w, cx| {
+                    actions_collapse(
+                        DiffAction::ToggleCollapsed {
+                            file_path: path_collapse.clone(),
+                        },
+                        w,
+                        cx,
+                    );
+                })
+                .child(SharedString::from(chevron)),
+        )
+        .child(status_badge(&data.status))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(13.0))
+                .text_color(if data.viewed {
+                    Theme::TEXT_MUTED
+                } else {
+                    Theme::TEXT
+                })
+                .child(path_display),
+        )
+        .child(
+            div()
+                .text_color(Theme::FILE_STATUS_ADD)
+                .text_size(px(11.0))
+                .child(SharedString::from(format!("+{}", data.additions))),
+        )
+        .child(
+            div()
+                .text_color(Theme::FILE_STATUS_DEL)
+                .text_size(px(11.0))
+                .child(SharedString::from(format!("-{}", data.deletions))),
+        );
+
+    if data.thread_count > 0 {
+        row = row.child(
+            div()
+                .text_color(Theme::TEXT_LINK)
+                .text_size(px(11.0))
+                .child(SharedString::from(format!(
+                    "💬 {}",
+                    data.thread_count
+                ))),
+        );
+    }
+
+    if data.previewable {
+        let label = if data.preview_on { "Code" } else { "Preview" };
+        row = row.child(small_button(
+            format!("fh-preview-{}", data.file_idx),
+            label,
+            move |w, cx| {
+                actions_preview(
+                    DiffAction::TogglePreview {
+                        file_path: path_preview.clone(),
+                    },
+                    w,
+                    cx,
+                );
+            },
+        ));
+    }
+
+    row = row
+        .child(small_button(
+            format!("fh-open-{}", data.file_idx),
+            "Open",
+            move |w, cx| {
+                actions_open(
+                    DiffAction::OpenFileInEditor {
+                        file_path: path_open.clone(),
+                    },
+                    w,
+                    cx,
+                );
+            },
+        ))
+        .child(small_button(
+            format!("fh-copy-{}", data.file_idx),
+            "Copy",
+            move |w, cx| {
+                actions_copy_all(
+                    DiffAction::CopyAllPromptForFile {
+                        file_path: path_copy.clone(),
+                    },
+                    w,
+                    cx,
+                );
+            },
+        ))
+        .child(viewed_pill(data.file_idx, data.viewed, move |w, cx| {
+            actions_viewed(
+                DiffAction::ToggleViewed {
+                    file_path: path_viewed.clone(),
+                },
+                w,
+                cx,
+            );
+        }));
+
+    row
+}
+
+fn viewed_pill(
+    file_idx: usize,
+    viewed: bool,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let actions = actions.clone();
+    let label = if viewed { "✓ Viewed" } else { "Viewed" };
+    let (bg, fg) = if viewed {
+        (Theme::FILE_STATUS_ADD, Theme::TEXT)
+    } else {
+        (Theme::BG_ELEVATED, Theme::TEXT_MUTED)
+    };
     div()
         .id(ElementId::Name(SharedString::from(format!(
-            "expand-{ix}-{}",
-            match direction {
-                ExpandDirection::Above => "above",
-                ExpandDirection::Below => "below",
-            }
+            "fh-viewed-{file_idx}"
         ))))
-        .w_full()
-        .px_3()
+        .px_2()
         .py_1()
-        .bg(Theme::DIFF_HUNK_BG)
-        .text_color(Theme::TEXT_LINK)
+        .rounded_sm()
+        .border_1()
+        .border_color(if viewed { Theme::FILE_STATUS_ADD } else { Theme::BORDER })
+        .bg(bg)
+        .text_color(fg)
+        .text_size(px(11.0))
         .cursor_pointer()
         .hover(|s| s.bg(Theme::BG_HOVER))
-        .on_click(move |_e, window, cx| {
-            actions(
-                DiffAction::ExpandContext {
-                    chunk_idx,
-                    direction,
-                },
-                window,
-                cx,
-            )
-        })
-        .child(label)
+        .on_click(move |_e, w, cx| on_click(w, cx))
+        .child(SharedString::from(label))
+}
+
+fn small_button(
+    id: String,
+    label: &'static str,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .px_2()
+        .py_1()
+        .text_size(px(11.0))
+        .text_color(Theme::TEXT_MUTED)
+        .border_1()
+        .border_color(Theme::BORDER)
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG_HOVER).text_color(Theme::TEXT))
+        .on_click(move |_e, w, cx| on_click(w, cx))
+        .child(SharedString::from(label))
+}
+
+fn status_badge(status: &FileStatus) -> impl IntoElement {
+    let (letter, color) = match status {
+        FileStatus::Added => ("A", Theme::FILE_STATUS_ADD),
+        FileStatus::Deleted => ("D", Theme::FILE_STATUS_DEL),
+        FileStatus::Modified => ("M", Theme::FILE_STATUS_MOD),
+        FileStatus::Renamed => ("R", Theme::TEXT_LINK),
+    };
+    div()
+        .w(px(18.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(11.0))
+        .text_color(color)
+        .border_1()
+        .border_color(color)
+        .rounded_xs()
+        .child(SharedString::from(letter))
 }
 
 fn hunk_header(header: SharedString) -> impl IntoElement {
@@ -167,13 +363,18 @@ fn hunk_header(header: SharedString) -> impl IntoElement {
         .child(header)
 }
 
-fn unified_row(cell: &RenderedCell, ix: usize, actions: &DiffActions) -> impl IntoElement {
+fn unified_row(
+    file_path: &SharedString,
+    cell: &RenderedCell,
+    ix: usize,
+    actions: &DiffActions,
+) -> impl IntoElement {
     div()
         .w_full()
         .flex()
         .flex_row()
         .bg(cell.bg)
-        .child(add_button(ix, "u", cell.anchor, actions))
+        .child(add_button(file_path, ix, "u", cell.anchor, actions))
         .child(gutter(line_number_label(cell)))
         .child(
             div()
@@ -185,6 +386,7 @@ fn unified_row(cell: &RenderedCell, ix: usize, actions: &DiffActions) -> impl In
 }
 
 fn split_row(
+    file_path: &SharedString,
     left: Option<&RenderedCell>,
     right: Option<&RenderedCell>,
     ix: usize,
@@ -194,28 +396,24 @@ fn split_row(
         .w_full()
         .flex()
         .flex_row()
-        .child(split_side(left, ix, "l", actions))
+        .child(split_side(file_path, left, ix, "l", actions))
         .child(div().w(px(1.0)).h_full().bg(Theme::BORDER))
-        .child(split_side(right, ix, "r", actions))
+        .child(split_side(file_path, right, ix, "r", actions))
 }
 
 fn split_side(
+    file_path: &SharedString,
     cell: Option<&RenderedCell>,
     ix: usize,
     side_tag: &'static str,
     actions: &DiffActions,
 ) -> impl IntoElement {
     let bg = cell.map(|c| c.bg).unwrap_or(Theme::BG_HOVER);
-    let mut side = div()
-        .w_1_2()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .bg(bg);
+    let mut side = div().w_1_2().min_w_0().flex().flex_row().bg(bg);
 
     if let Some(cell) = cell {
         side = side
-            .child(add_button(ix, side_tag, cell.anchor, actions))
+            .child(add_button(file_path, ix, side_tag, cell.anchor, actions))
             .child(gutter(line_number_label(cell)))
             .child(cell_text(cell));
     }
@@ -223,12 +421,11 @@ fn split_side(
     side
 }
 
-/// A small "+" affordance that opens the compose form pre-filled for this
-/// line. Disabled (no click handler) for rows without an anchor.
 fn add_button(
+    file_path: &SharedString,
     ix: usize,
     tag: &'static str,
-    anchor: Option<CommentAnchor>,
+    anchor: Option<crate::ui::diff_rows::CommentAnchor>,
     actions: &DiffActions,
 ) -> impl IntoElement {
     let id = ElementId::Name(SharedString::from(format!("add-{tag}-{ix}")));
@@ -242,11 +439,19 @@ fn add_button(
         .text_size(px(11.0));
     if let Some(anchor) = anchor {
         let actions = actions.clone();
+        let path = file_path.to_string();
         btn = btn
             .cursor_pointer()
             .hover(|s| s.bg(Theme::BG_HOVER).text_color(Theme::TEXT_LINK))
             .on_click(move |_e, window, cx| {
-                actions(DiffAction::StartComposeAt(anchor), window, cx)
+                actions(
+                    DiffAction::StartComposeAt {
+                        file_path: path.clone(),
+                        anchor,
+                    },
+                    window,
+                    cx,
+                )
             })
             .child(SharedString::from("+"));
     }
@@ -284,55 +489,43 @@ fn line_number_label(cell: &RenderedCell) -> SharedString {
         .unwrap_or_default()
 }
 
-fn file_header(file: &DiffFile, thread_count: usize) -> impl IntoElement {
-    let path_display = match &file.old_path {
-        Some(old) if old != &file.path => format!("{old} → {}", file.path),
-        _ => file.path.clone(),
-    };
-
-    let mut row = div()
+fn expand_row(
+    file_path: &SharedString,
+    chunk_idx: usize,
+    direction: ExpandDirection,
+    label: SharedString,
+    ix: usize,
+    actions: &DiffActions,
+) -> impl IntoElement {
+    let actions = actions.clone();
+    let path = file_path.to_string();
+    div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "expand-{ix}-{}",
+            match direction {
+                ExpandDirection::Above => "above",
+                ExpandDirection::Below => "below",
+            }
+        ))))
         .w_full()
-        .flex_shrink_0()
-        .px_4()
-        .py_2()
-        .bg(Theme::BG_ELEVATED)
-        .border_b_1()
-        .border_color(Theme::BORDER)
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(
-            div()
-                .text_color(Theme::TEXT)
-                .text_size(px(13.0))
-                .child(SharedString::from(path_display)),
-        )
-        .child(
-            div()
-                .text_color(Theme::FILE_STATUS_ADD)
-                .text_size(px(11.0))
-                .child(SharedString::from(format!("+{}", file.additions))),
-        )
-        .child(
-            div()
-                .text_color(Theme::FILE_STATUS_DEL)
-                .text_size(px(11.0))
-                .child(SharedString::from(format!("-{}", file.deletions))),
-        );
-
-    if thread_count > 0 {
-        row = row.child(
-            div()
-                .text_color(Theme::TEXT_LINK)
-                .text_size(px(11.0))
-                .child(SharedString::from(format!(
-                    "💬 {thread_count} thread{}",
-                    if thread_count == 1 { "" } else { "s" }
-                ))),
-        );
-    }
-
-    row
+        .px_3()
+        .py_1()
+        .bg(Theme::DIFF_HUNK_BG)
+        .text_color(Theme::TEXT_LINK)
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG_HOVER))
+        .on_click(move |_e, window, cx| {
+            actions(
+                DiffAction::ExpandContext {
+                    file_path: path.clone(),
+                    chunk_idx,
+                    direction,
+                },
+                window,
+                cx,
+            )
+        })
+        .child(label)
 }
 
 fn empty_placeholder(msg: &'static str) -> impl IntoElement {
@@ -343,10 +536,10 @@ fn empty_placeholder(msg: &'static str) -> impl IntoElement {
         .child(SharedString::from(msg))
 }
 
-/// Count comment threads attached to a specific file, for the header badge.
+/// Count comment threads attached to a specific file (used by app.rs).
 pub fn count_threads_for_file<'a>(
     file_path: &str,
-    threads: impl IntoIterator<Item = &'a DiffCommentThread>,
+    threads: impl IntoIterator<Item = &'a crate::api::types::DiffCommentThread>,
 ) -> usize {
     threads.into_iter().filter(|t| t.file_path == file_path).count()
 }
