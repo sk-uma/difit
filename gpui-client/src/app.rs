@@ -31,6 +31,7 @@ use crate::settings_store::{self, Settings};
 use crate::ui::settings_modal::render_settings_modal;
 use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
+use crate::ui::widgets::{logo, toggle_switch};
 use crate::viewed_store::{is_auto_viewed, ViewedStore};
 
 pub struct DifitApp {
@@ -72,6 +73,11 @@ pub struct DifitApp {
     /// Paths the user has collapsed (in addition to auto-collapsed
     /// generated files).
     collapsed: HashSet<String>,
+    /// Directories collapsed in the sidebar tree (default = all
+    /// expanded).
+    collapsed_dirs: HashSet<String>,
+    /// Text input for the sidebar filter.
+    file_filter: Entity<TextInput>,
     /// `/api/generated-status` results cached per (path, ref).
     generated_cache: HashMap<(String, String), bool>,
     /// Paths for which we've already evaluated the auto-collapse rule
@@ -130,6 +136,9 @@ struct RenderedCacheEntry {
 
 impl DifitApp {
     pub fn new(api: Arc<ApiClient>, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let filter_input = cx.new(|cx| {
+            TextInput::new(InputMode::SingleLine, "Filter files…", cx)
+        });
         let view = cx.new(|cx| Self {
             api: api.clone(),
             diff: None,
@@ -159,6 +168,8 @@ impl DifitApp {
             expansion_version: 0,
             ui_version: 0,
             collapsed: HashSet::new(),
+            collapsed_dirs: HashSet::new(),
+            file_filter: filter_input.clone(),
             generated_cache: HashMap::new(),
             auto_collapse_done: HashSet::new(),
             blob_cache: HashMap::new(),
@@ -671,6 +682,15 @@ impl DifitApp {
             log::warn!("viewed save failed: {e:#}");
         }
         self.bump_ui();
+        cx.notify();
+    }
+
+    fn toggle_dir_collapsed(&mut self, dir_path: String, cx: &mut Context<Self>) {
+        if self.collapsed_dirs.contains(&dir_path) {
+            self.collapsed_dirs.remove(&dir_path);
+        } else {
+            self.collapsed_dirs.insert(dir_path);
+        }
         cx.notify();
     }
 
@@ -1331,6 +1351,25 @@ fn format_thread_prompt(thread: &DiffCommentThread) -> String {
     format!("{header}\n{bodies}")
 }
 
+fn render_footer() -> impl IntoElement {
+    div()
+        .w_full()
+        .h(px(28.0))
+        .px_4()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .bg(Theme::BG_ELEVATED)
+        .border_t_1()
+        .border_color(Theme::BORDER)
+        .text_color(Theme::TEXT_MUTED)
+        .text_size(px(11.0))
+        .child(SharedString::from(
+            "⭐ Star on GitHub: github.com/yoshiko-pg/difit",
+        ))
+}
+
 fn next_thread_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1394,6 +1433,8 @@ impl Render for DifitApp {
         let actions = self.build_actions(&entity);
         let viewed_paths: HashSet<String> = self.viewed_paths_for_current_repo();
         let collapsed_snapshot: HashSet<String> = self.collapsed.clone();
+        let collapsed_dirs_snapshot: HashSet<String> = self.collapsed_dirs.clone();
+        let filter_text: String = self.file_filter.read(cx).content().to_string();
 
         // Fire off blob fetches for every special-viewer file the build
         // surfaced (image/notebook/markdown-preview). pending_blob_fetches
@@ -1410,6 +1451,11 @@ impl Render for DifitApp {
         let active_file = selected.and_then(|i| files.get(i));
         let active_path = active_file.map(|f| f.path.clone());
 
+        let file_count = diff.as_ref().map(|d| d.files.len()).unwrap_or(0);
+        let reviewing_text = match (selected_base.as_deref(), selected_target.as_deref()) {
+            (Some(b), Some(t)) => format!("Reviewing: {} ← {}", t, b),
+            _ => String::new(),
+        };
         let root = div()
             .size_full()
             .flex()
@@ -1435,8 +1481,8 @@ impl Render for DifitApp {
                 status,
                 view_mode,
                 revisions,
-                selected_base,
-                selected_target,
+                selected_base: selected_base.clone(),
+                selected_target: selected_target.clone(),
                 base_open,
                 target_open,
                 can_compose,
@@ -1444,6 +1490,8 @@ impl Render for DifitApp {
                 ignore_whitespace,
                 use_merge_base,
                 active_path,
+                file_count,
+                reviewing_text: reviewing_text.clone(),
                 entity: entity.clone(),
             }))
             .child(
@@ -1457,6 +1505,9 @@ impl Render for DifitApp {
                         selected,
                         &viewed_paths,
                         &collapsed_snapshot,
+                        &collapsed_dirs_snapshot,
+                        Some(self.file_filter.clone()),
+                        &filter_text,
                         {
                             let entity = entity.clone();
                             move |idx, cx| {
@@ -1507,9 +1558,18 @@ impl Render for DifitApp {
                                 });
                             }
                         },
+                        {
+                            let entity = entity.clone();
+                            move |dir_path, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.toggle_dir_collapsed(dir_path, cx)
+                                });
+                            }
+                        },
                     ))
                     .child(self.render_main_column(rendered, font_size, actions, &entity)),
-            );
+            )
+            .child(render_footer());
 
         let root = if show_help {
             let entity_for_close = entity.clone();
@@ -1659,6 +1719,8 @@ struct HeaderInputs {
     ignore_whitespace: bool,
     use_merge_base: bool,
     active_path: Option<String>,
+    file_count: usize,
+    reviewing_text: String,
     entity: Entity<DifitApp>,
 }
 
@@ -1676,6 +1738,8 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         ignore_whitespace,
         use_merge_base,
         active_path,
+        file_count,
+        reviewing_text,
         entity,
     } = inputs;
 
@@ -1714,13 +1778,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         .bg(Theme::BG_ELEVATED)
         .border_b_1()
         .border_color(Theme::BORDER)
-        .child(
-            div()
-                .text_color(Theme::TEXT)
-                .text_size(px(13.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(SharedString::from("difit")),
-        )
+        .child(logo())
         .child(render_revision_picker(
             RevisionRole::Base,
             selected_base.as_deref(),
@@ -1770,13 +1828,21 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         .child(
             div()
                 .flex_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
                 .text_size(px(12.0))
                 .text_color(Theme::TEXT_MUTED)
-                .child(status),
+                .child(div().child(status))
+                .child(
+                    div().child(SharedString::from(format!("{file_count} files changed"))),
+                )
+                .child(div().child(SharedString::from(reviewing_text))),
         )
-        .child(toggle_header_button(
+        .child(toggle_switch(
             "ws",
-            "WS",
+            "Ignore whitespace",
             ignore_whitespace,
             move |cx: &mut App| {
                 entity_ws.update(cx, |this, cx| this.toggle_ignore_whitespace(cx));
@@ -1790,16 +1856,21 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
                 entity_mb.update(cx, |this, cx| this.toggle_merge_base(cx));
             },
         ))
-        .child(header_button("view-mode", view_mode.label(), {
-            let entity = entity_g.clone();
-            move |cx: &mut App| {
-                entity.update(cx, |this, cx| {
-                    this.view_mode = this.view_mode.toggle();
-                    this.rendered_cache = None;
-                    cx.notify();
-                });
-            }
-        }))
+        .child(toggle_switch(
+            "view-mode",
+            "Side by Side",
+            view_mode == DiffViewMode::Split,
+            {
+                let entity = entity_g.clone();
+                move |cx: &mut App| {
+                    entity.update(cx, |this, cx| {
+                        this.view_mode = this.view_mode.toggle();
+                        this.rendered_cache = None;
+                        cx.notify();
+                    });
+                }
+            },
+        ))
         .child(header_button("refresh", "Refresh", {
             let entity = entity_g;
             move |cx: &mut App| {
