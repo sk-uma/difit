@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use gpui::{
     div, prelude::*, px, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ListAlignment, ListState, ParentElement, SharedString, Styled, Window,
+    ListAlignment, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement,
+    SharedString, Styled, Window,
 };
 
 use crate::api::client::{CommentSelectionQuery, DiffQuery, WatchEvent};
@@ -70,6 +71,8 @@ pub struct DifitApp {
     /// Bumped whenever any UI-shape state (collapsed, viewed,
     /// preview_paths, blob_cache) changes.
     ui_version: u64,
+    /// In-progress drag of the diff scrollbar thumb.
+    scrollbar_drag: Option<ScrollbarDragState>,
     /// Paths the user has collapsed (in addition to auto-collapsed
     /// generated files).
     collapsed: HashSet<String>,
@@ -106,6 +109,14 @@ struct ComposeState {
     line_input: Entity<TextInput>,
     body_input: Entity<TextInput>,
     mode: ComposeMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScrollbarDragState {
+    start_mouse_y: f32,
+    start_offset_px: f32,
+    /// max_offset / track_space — converts mouse delta to list offset.
+    px_per_drag: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +178,7 @@ impl DifitApp {
             expansions: HashMap::new(),
             expansion_version: 0,
             ui_version: 0,
+            scrollbar_drag: None,
             collapsed: HashSet::new(),
             collapsed_dirs: HashSet::new(),
             file_filter: filter_input.clone(),
@@ -1247,6 +1259,41 @@ impl DifitApp {
                 DiffAction::CopyAllPromptForFile { file_path } => {
                     this.copy_all_prompts_for_file(&file_path, cx);
                 }
+                DiffAction::ScrollbarDragStart {
+                    mouse_y,
+                    current_offset_px,
+                    max_offset_px,
+                    track_space_px,
+                } => {
+                    if track_space_px > 0.0 && max_offset_px > 0.0 {
+                        this.scrollbar_drag = Some(ScrollbarDragState {
+                            start_mouse_y: mouse_y,
+                            start_offset_px: current_offset_px,
+                            px_per_drag: max_offset_px / track_space_px,
+                        });
+                        if let Some(cache) = this.rendered_cache.as_ref() {
+                            cache.list_state.scrollbar_drag_started();
+                        }
+                    }
+                }
+                DiffAction::ScrollbarDragMove { mouse_y } => {
+                    let Some(drag) = this.scrollbar_drag else { return };
+                    let Some(cache) = this.rendered_cache.as_ref() else { return };
+                    let target = drag.start_offset_px
+                        + (mouse_y - drag.start_mouse_y) * drag.px_per_drag;
+                    let current = -f32::from(cache.list_state.scroll_px_offset_for_scrollbar().y);
+                    let delta = target - current;
+                    if delta.abs() > 0.5 {
+                        cache.list_state.scroll_by(px(delta));
+                        cx.notify();
+                    }
+                }
+                DiffAction::ScrollbarDragEnd => {
+                    this.scrollbar_drag = None;
+                    if let Some(cache) = this.rendered_cache.as_ref() {
+                        cache.list_state.scrollbar_drag_ended();
+                    }
+                }
             });
         })
     }
@@ -1456,12 +1503,32 @@ impl Render for DifitApp {
             (Some(b), Some(t)) => format!("Reviewing: {} ← {}", t, b),
             _ => String::new(),
         };
+        let drag_active = self.scrollbar_drag.is_some();
+        let actions_move = actions.clone();
+        let actions_up = actions.clone();
         let root = div()
             .size_full()
             .flex()
             .flex_col()
             .key_context("DifitApp")
             .track_focus(&self.focus_handle)
+            .on_mouse_move(move |e: &MouseMoveEvent, window, cx| {
+                if drag_active {
+                    actions_move(
+                        DiffAction::ScrollbarDragMove {
+                            mouse_y: f32::from(e.position.y),
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            })
+            .on_mouse_up(
+                MouseButton::Left,
+                move |_e: &MouseUpEvent, window, cx| {
+                    actions_up(DiffAction::ScrollbarDragEnd, window, cx);
+                },
+            )
             .on_action(cx.listener(Self::on_next_row))
             .on_action(cx.listener(Self::on_prev_row))
             .on_action(cx.listener(Self::on_next_file))
