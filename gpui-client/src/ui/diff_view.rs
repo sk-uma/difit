@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, list, prelude::*, px, AnyElement, ElementId, IntoElement, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, SharedString, Styled, StyledText,
+    canvas, div, list, prelude::*, px, AnyElement, ElementId, IntoElement, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, SharedString, Styled, StyledText,
 };
 
 use crate::api::types::FileStatus;
@@ -125,13 +125,15 @@ fn list_scrollbar(state: ListState, total_items: usize, actions: DiffActions) ->
             (0.0, 0.0, 0.0, 0.0)
         };
 
-    // mouse_move / mouse_up handling lives on the app's root div so
-    // dragging keeps working even when the cursor leaves the track.
-    // The thumb only needs mouse_down to seed the drag snapshot.
-    let actions_down = actions;
+    // Mouse handlers are registered through `window.on_mouse_event` in
+    // the canvas paint phase so they fire for *all* events — even when
+    // the cursor is outside the scrollbar (or the whole window) while a
+    // drag is in progress.
+    let actions_down = actions.clone();
+    let actions_move = actions.clone();
+    let actions_up = actions;
 
     div()
-        .id(ElementId::Name(SharedString::from("scrollbar-track")))
         .w(px(10.0))
         .h_full()
         .flex_shrink_0()
@@ -139,7 +141,6 @@ fn list_scrollbar(state: ListState, total_items: usize, actions: DiffActions) ->
         .relative()
         .child(
             div()
-                .id(ElementId::Name(SharedString::from("scrollbar-thumb")))
                 .absolute()
                 .top(px(thumb_top))
                 .left(px(2.0))
@@ -147,22 +148,50 @@ fn list_scrollbar(state: ListState, total_items: usize, actions: DiffActions) ->
                 .h(px(thumb_h))
                 .bg(Theme::TEXT_MUTED)
                 .rounded_full()
-                .cursor_pointer()
-                .hover(|s| s.bg(Theme::TEXT))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    move |e: &MouseDownEvent, window, cx| {
-                        actions_down(
-                            DiffAction::ScrollbarDragStart {
-                                mouse_y: f32::from(e.position.y),
-                                start_top_item: top_item,
-                                scroll_range_items: scroll_range,
-                                track_space_px: track_space,
-                            },
-                            window,
-                            cx,
-                        );
-                    },
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |thumb_bounds, _, window, _| {
+                            let actions_down = actions_down.clone();
+                            window.on_mouse_event(move |ev: &MouseDownEvent, _, w, cx| {
+                                if ev.button != MouseButton::Left {
+                                    return;
+                                }
+                                if !thumb_bounds.contains(&ev.position) {
+                                    return;
+                                }
+                                actions_down(
+                                    DiffAction::ScrollbarDragStart {
+                                        mouse_y: f32::from(ev.position.y),
+                                        start_top_item: top_item,
+                                        scroll_range_items: scroll_range,
+                                        track_space_px: track_space,
+                                    },
+                                    w,
+                                    cx,
+                                );
+                            });
+                            let actions_move = actions_move.clone();
+                            window.on_mouse_event(move |ev: &MouseMoveEvent, _, w, cx| {
+                                if !ev.dragging() {
+                                    return;
+                                }
+                                actions_move(
+                                    DiffAction::ScrollbarDragMove {
+                                        mouse_y: f32::from(ev.position.y),
+                                    },
+                                    w,
+                                    cx,
+                                );
+                            });
+                            let actions_up = actions_up.clone();
+                            window.on_mouse_event(move |_ev: &MouseUpEvent, _, w, cx| {
+                                actions_up(DiffAction::ScrollbarDragEnd, w, cx);
+                            });
+                        },
+                    )
+                    .w_full()
+                    .h_full(),
                 ),
         )
 }

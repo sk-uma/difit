@@ -59,18 +59,15 @@ pub enum DiffAction {
     OpenFileInEditor { file_path: String },
     /// Copy all comments for a file.
     CopyAllPromptForFile { file_path: String },
-    /// Mouse went down on the diff scrollbar thumb. The snapshot lets
-    /// the app translate subsequent ScrollbarDragMove events into list
-    /// offsets without re-reading viewport geometry. Scrolling is
-    /// row-index based so the thumb stays a stable size without
-    /// `measure_all()`.
+    /// Mouse went down on the scrollbar thumb. Carries the snapshot
+    /// needed to translate later DragMove events into row indices.
     ScrollbarDragStart {
         mouse_y: f32,
         start_top_item: f32,
         scroll_range_items: f32,
         track_space_px: f32,
     },
-    /// Mouse moved while the scrollbar thumb is being dragged.
+    /// Mouse moved while the thumb is being dragged.
     ScrollbarDragMove { mouse_y: f32 },
     /// Mouse released; clear drag state.
     ScrollbarDragEnd,
