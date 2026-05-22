@@ -1,8 +1,11 @@
-use gpui::{div, prelude::*, px, ElementId, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{
+    div, prelude::*, px, ElementId, IntoElement, ParentElement, SharedString, Styled, StyledText,
+};
 
 use crate::api::types::{DiffCommentMessage, DiffCommentThread, DiffLineRange};
 use crate::ui::actions::{DiffAction, DiffActions};
 use crate::ui::diff_rows::CommentAnchor;
+use crate::ui::markdown_view::parse_inline;
 use crate::ui::theme::{Theme, UI_FONT};
 
 pub fn render_thread(thread: &DiffCommentThread, actions: &DiffActions) -> impl IntoElement {
@@ -193,8 +196,17 @@ fn render_message(
             div()
                 .mt_1()
                 .text_color(Theme::TEXT)
-                .child(SharedString::from(msg.body.clone())),
+                .child(render_comment_body(&msg.body)),
         )
+}
+
+fn render_comment_body(text: &str) -> StyledText {
+    let (rendered, highlights) = parse_inline(text);
+    if highlights.is_empty() {
+        StyledText::new(SharedString::from(rendered))
+    } else {
+        StyledText::new(SharedString::from(rendered)).with_highlights(highlights)
+    }
 }
 
 fn mini_button(

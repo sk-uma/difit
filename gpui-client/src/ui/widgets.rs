@@ -1,9 +1,43 @@
 //! Small reusable UI primitives shared across the app: toggle switches,
 //! pill buttons, and the difit logo glyph.
 
-use gpui::{div, prelude::*, px, App, ElementId, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{
+    div, prelude::*, px, AnyView, App, Context, ElementId, IntoElement, ParentElement,
+    SharedString, Styled, Window,
+};
 
 use crate::ui::theme::Theme;
+
+/// Small hover-bubble view. Returned by `label_tooltip`.
+pub struct TooltipBubble {
+    pub text: SharedString,
+}
+
+impl gpui::Render for TooltipBubble {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .bg(Theme::BG_ELEVATED)
+            .border_1()
+            .border_color(Theme::BORDER)
+            .rounded_sm()
+            .text_size(px(11.0))
+            .text_color(Theme::TEXT)
+            .child(self.text.clone())
+    }
+}
+
+/// Returns a closure suitable for `Div::tooltip` that pops up a labelled
+/// bubble on hover.
+pub fn label_tooltip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_window, cx| {
+        cx.new(|_cx| TooltipBubble {
+            text: SharedString::from(label),
+        })
+        .into()
+    }
+}
 
 /// A two-state toggle styled like the React UI (label + sliding pill).
 pub fn toggle_switch(

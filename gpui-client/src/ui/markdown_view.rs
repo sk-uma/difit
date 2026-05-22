@@ -10,10 +10,102 @@
 //! block with a note pointing the user at the React UI — GPUI has no
 //! WebView, so we can't actually run mermaid.js.
 
-use gpui::{div, prelude::*, px, IntoElement, ParentElement, SharedString, Styled};
+use std::ops::Range;
+
+use gpui::{
+    div, prelude::*, px, HighlightStyle, IntoElement, ParentElement, SharedString, Styled,
+};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::ui::theme::{Theme, MONO_FONT, UI_FONT};
+
+/// Parse `text` as a single inline-context markdown blob and return:
+/// 1. the plain-text version (with bold/italic markers stripped, inline
+///    code unwrapped),
+/// 2. a list of byte-range highlights for the bold / italic / inline-code
+///    spans in that string.
+///
+/// Block elements collapse: paragraphs are joined with `\n\n`, list items
+/// are prefixed with `• `. Good enough for comment bodies.
+pub fn parse_inline(text: &str) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    let parser = Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH);
+    let mut out = String::with_capacity(text.len());
+    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut bold_starts: Vec<usize> = Vec::new();
+    let mut italic_starts: Vec<usize> = Vec::new();
+    let mut paragraph_seen = false;
+    let mut in_list = false;
+
+    for event in parser {
+        match event {
+            Event::Text(t) => out.push_str(&t),
+            Event::Code(t) => {
+                let start = out.len();
+                out.push_str(&t);
+                highlights.push((start..out.len(), inline_code_style()));
+            }
+            Event::Start(Tag::Strong) => bold_starts.push(out.len()),
+            Event::End(TagEnd::Strong) => {
+                if let Some(s) = bold_starts.pop() {
+                    highlights.push((s..out.len(), bold_style()));
+                }
+            }
+            Event::Start(Tag::Emphasis) => italic_starts.push(out.len()),
+            Event::End(TagEnd::Emphasis) => {
+                if let Some(s) = italic_starts.pop() {
+                    highlights.push((s..out.len(), italic_style()));
+                }
+            }
+            Event::Start(Tag::Paragraph) => {
+                if paragraph_seen {
+                    out.push_str("\n\n");
+                }
+                paragraph_seen = true;
+            }
+            Event::End(TagEnd::Paragraph) => {}
+            Event::Start(Tag::List(_)) => {
+                in_list = true;
+                paragraph_seen = true;
+            }
+            Event::End(TagEnd::List(_)) => in_list = false,
+            Event::Start(Tag::Item) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str("• ");
+            }
+            Event::End(TagEnd::Item) => out.push('\n'),
+            Event::SoftBreak | Event::HardBreak => out.push('\n'),
+            _ => {}
+        }
+    }
+    let _ = in_list;
+    // Pulldown's events are tag-order; some highlights might be in
+    // out-of-order ranges. combine_highlights expects sorted, but we
+    // hand them to with_highlights which accepts any.
+    (out, highlights)
+}
+
+fn bold_style() -> HighlightStyle {
+    HighlightStyle {
+        font_weight: Some(gpui::FontWeight::BOLD),
+        ..Default::default()
+    }
+}
+
+fn italic_style() -> HighlightStyle {
+    HighlightStyle {
+        font_style: Some(gpui::FontStyle::Italic),
+        ..Default::default()
+    }
+}
+
+fn inline_code_style() -> HighlightStyle {
+    HighlightStyle {
+        background_color: Some(Theme::BG_HOVER.into()),
+        ..Default::default()
+    }
+}
 
 #[derive(Debug, Clone)]
 enum Block {

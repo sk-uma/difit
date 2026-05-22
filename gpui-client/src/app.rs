@@ -31,7 +31,7 @@ use crate::settings_store::{self, Settings};
 use crate::ui::settings_modal::render_settings_modal;
 use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
-use crate::ui::widgets::{logo, toggle_switch};
+use crate::ui::widgets::{label_tooltip, logo, toggle_switch};
 use crate::viewed_store::{is_auto_viewed, ViewedStore};
 
 pub struct DifitApp {
@@ -1991,6 +1991,7 @@ fn header_button_enabled(
         .border_color(Theme::BORDER)
         .text_size(px(12.0))
         .text_color(if enabled { Theme::TEXT } else { Theme::TEXT_MUTED })
+        .tooltip(label_tooltip(label))
         .child(SharedString::from(label));
     if enabled {
         btn = btn
@@ -2042,5 +2043,6 @@ fn header_button(
         .cursor_pointer()
         .hover(|s| s.bg(Theme::BG_HOVER))
         .on_click(move |_event, _window, cx| on_click(cx))
+        .tooltip(label_tooltip(label))
         .child(SharedString::from(label))
 }
