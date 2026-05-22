@@ -14,6 +14,7 @@ use gpui::{
 use crate::api::types::{DiffFile, FileStatus};
 use crate::ui::text_input::TextInput;
 use crate::ui::theme::{Theme, UI_FONT};
+use crate::ui::widgets::icon;
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_file_list(
@@ -226,7 +227,8 @@ fn render_nodes(
         match node {
             Node::Dir { name, path, children } => {
                 let open = !collapsed_dirs.contains(path);
-                let chevron = if open { "▼" } else { "▶" };
+                let chevron_name = if open { "chevron-down" } else { "chevron-right" };
+                let folder_name = if open { "folder-open" } else { "folder" };
                 let path_owned = path.clone();
                 let cb = on_toggle_dir.clone();
                 out.push(
@@ -242,13 +244,8 @@ fn render_nodes(
                         .cursor_pointer()
                         .hover(|s| s.bg(Theme::BG_HOVER))
                         .on_click(move |_e, _w, cx| cb(path_owned.clone(), cx))
-                        .child(
-                            div()
-                                .w(px(12.0))
-                                .text_size(px(10.0))
-                                .text_color(Theme::TEXT_MUTED)
-                                .child(SharedString::from(chevron)),
-                        )
+                        .child(icon(chevron_name, 12.0, Theme::TEXT_MUTED))
+                        .child(icon(folder_name, 14.0, Theme::TEXT_MUTED))
                         .child(
                             div()
                                 .text_color(Theme::TEXT_MUTED)
@@ -386,16 +383,13 @@ fn collapse_chevron(
     collapsed: bool,
     on_toggle: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    let label = if collapsed { "▶" } else { "▼" };
+    let name = if collapsed { "chevron-right" } else { "chevron-down" };
     div()
         .id(id)
-        .w(px(12.0))
-        .text_size(px(9.0))
-        .text_color(Theme::TEXT_MUTED)
         .cursor_pointer()
-        .hover(|s| s.text_color(Theme::TEXT_LINK))
+        .hover(|s| s.opacity(0.7))
         .on_click(move |_e, _w, cx| on_toggle(cx))
-        .child(SharedString::from(label))
+        .child(icon(name, 12.0, Theme::TEXT_MUTED))
 }
 
 fn viewed_checkbox(
@@ -403,11 +397,7 @@ fn viewed_checkbox(
     checked: bool,
     on_toggle: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    let (label, fg) = if checked {
-        ("✓", Theme::FILE_STATUS_ADD)
-    } else {
-        ("·", Theme::TEXT_MUTED)
-    };
+    let bg = if checked { Theme::FILE_STATUS_ADD } else { Theme::BG_ELEVATED };
     div()
         .id(id)
         .w(px(16.0))
@@ -415,34 +405,26 @@ fn viewed_checkbox(
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(10.0))
-        .text_color(fg)
+        .bg(bg)
         .border_1()
-        .border_color(Theme::BORDER)
+        .border_color(if checked { Theme::FILE_STATUS_ADD } else { Theme::BORDER })
         .rounded_xs()
         .cursor_pointer()
         .hover(|s| s.bg(Theme::BG_HOVER))
         .on_click(move |_e, _w, cx| on_toggle(cx))
-        .child(SharedString::from(label))
+        .child(if checked {
+            icon("check", 10.0, Theme::TEXT).into_any_element()
+        } else {
+            div().into_any_element()
+        })
 }
 
 fn status_badge(status: &FileStatus) -> impl IntoElement {
-    let (letter, color) = match status {
-        FileStatus::Added => ("A", Theme::FILE_STATUS_ADD),
-        FileStatus::Deleted => ("D", Theme::FILE_STATUS_DEL),
-        FileStatus::Modified => ("M", Theme::FILE_STATUS_MOD),
-        FileStatus::Renamed => ("R", Theme::TEXT_LINK),
+    let (icon_name, color) = match status {
+        FileStatus::Added => ("file-plus", Theme::FILE_STATUS_ADD),
+        FileStatus::Deleted => ("file-x", Theme::FILE_STATUS_DEL),
+        FileStatus::Modified => ("file-pen", Theme::FILE_STATUS_MOD),
+        FileStatus::Renamed => ("file-diff", Theme::TEXT_LINK),
     };
-    div()
-        .w(px(14.0))
-        .h(px(14.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(10.0))
-        .text_color(color)
-        .border_1()
-        .border_color(color)
-        .rounded_xs()
-        .child(SharedString::from(letter))
+    icon(icon_name, 14.0, color)
 }

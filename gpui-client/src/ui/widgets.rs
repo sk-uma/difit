@@ -2,11 +2,33 @@
 //! pill buttons, and the difit logo glyph.
 
 use gpui::{
-    div, prelude::*, px, AnyView, App, Context, ElementId, IntoElement, ParentElement,
-    SharedString, Styled, Window,
+    div, prelude::*, px, svg, AnyView, App, Context, ElementId, IntoElement, ParentElement,
+    Rgba, SharedString, Styled, Window,
 };
 
 use crate::ui::theme::Theme;
+
+/// Render an embedded SVG icon. `name` is the filename without
+/// extension (e.g. `"chevron-right"`). Color follows `currentColor`
+/// via `.text_color`.
+pub fn icon(name: &str, size_px: f32, color: Rgba) -> impl IntoElement {
+    svg()
+        .path(SharedString::from(format!("icons/{name}.svg")))
+        .w(px(size_px))
+        .h(px(size_px))
+        .text_color(color)
+}
+
+/// Icon + label inline, used when replacing text-only header buttons.
+pub fn icon_label(name: &str, label: &'static str) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(icon(name, 14.0, Theme::TEXT_MUTED))
+        .child(SharedString::from(label))
+}
 
 /// Small hover-bubble view. Returned by `label_tooltip`.
 pub struct TooltipBubble {
@@ -88,25 +110,12 @@ pub fn toggle_switch(
         )
 }
 
-/// "difit" logo: a colored square + text.
+/// "difit" wordmark, rendered via the embedded logo SVG (lifted from
+/// the React `Logo.tsx`).
 pub fn logo() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded_sm()
-                .bg(Theme::TEXT_LINK),
-        )
-        .child(
-            div()
-                .text_size(px(13.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Theme::TEXT)
-                .child(SharedString::from("difit")),
-        )
+    svg()
+        .path(SharedString::from("icons/difit-logo.svg"))
+        .w(px(72.0))
+        .h(px(19.0))
+        .text_color(Theme::TEXT)
 }

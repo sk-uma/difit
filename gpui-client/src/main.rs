@@ -8,6 +8,7 @@ use url::Url;
 
 mod api;
 mod app;
+mod assets;
 mod highlighting;
 mod settings_store;
 mod ui;
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
 
     crate::settings_store::install(crate::settings_store::Settings::load());
 
-    application().run(move |cx: &mut App| {
+    application().with_assets(crate::assets::EmbeddedAssets).run(move |cx: &mut App| {
         crate::ui::text_input::bind_keys(cx);
         crate::ui::keybindings::bind_keys(cx);
 
