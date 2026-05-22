@@ -10,12 +10,16 @@ use crate::ui::theme::Theme;
 
 /// Render an embedded SVG icon. `name` is the filename without
 /// extension (e.g. `"chevron-right"`). Color follows `currentColor`
-/// via `.text_color`.
+/// via `.text_color`. The icon is locked to its declared size — without
+/// `flex_shrink_0` GPUI's flex layout will sometimes collapse the SVG to
+/// 0x0 inside crowded rows and the renderer logs "can't render at a
+/// zero size" on every frame.
 pub fn icon(name: &str, size_px: f32, color: Rgba) -> impl IntoElement {
     svg()
         .path(SharedString::from(format!("icons/{name}.svg")))
         .w(px(size_px))
         .h(px(size_px))
+        .flex_shrink_0()
         .text_color(color)
 }
 
@@ -117,5 +121,6 @@ pub fn logo() -> impl IntoElement {
         .path(SharedString::from("icons/difit-logo.svg"))
         .w(px(72.0))
         .h(px(19.0))
+        .flex_shrink_0()
         .text_color(Theme::TEXT)
 }
