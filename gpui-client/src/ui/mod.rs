@@ -8,6 +8,8 @@ pub mod file_list;
 pub mod help_modal;
 pub mod image_viewer;
 pub mod keybindings;
+pub mod markdown_view;
+pub mod notebook_view;
 pub mod revision_modal;
 pub mod revision_picker;
 pub mod settings_modal;

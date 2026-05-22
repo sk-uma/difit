@@ -19,6 +19,8 @@ use crate::ui::diff_rows::{build_rows, expand_step, CommentAnchor, DiffRow, Expa
 use crate::ui::diff_view::{count_threads_for_file, render_diff, DiffViewMode, RenderedDiff};
 use crate::ui::file_list::render_file_list;
 use crate::ui::image_viewer::{is_image_ext, render_image_diff};
+use crate::ui::markdown_view::render_markdown;
+use crate::ui::notebook_view::{is_notebook_ext, render_notebook};
 use crate::ui::help_modal::render_help_modal;
 use crate::ui::keybindings::{
     Compose, Escape, NextFile, NextRow, OpenInEditor, PrevFile, PrevRow, Refresh, ToggleHelp,
@@ -82,6 +84,8 @@ pub struct DifitApp {
     /// (path, ref) pairs for which an image blob fetch is already in
     /// flight. Prevents render() from re-issuing the same request.
     pending_image_fetches: HashSet<(String, String)>,
+    /// Markdown files the user has toggled into preview mode.
+    preview_paths: HashSet<String>,
     /// Index into the current `rendered_cache.rows` for the keyboard-
     /// focused row. Skips non-anchorable rows during j/k navigation.
     selected_row: Option<usize>,
@@ -157,6 +161,7 @@ impl DifitApp {
             auto_collapse_done: HashSet::new(),
             image_blob_cache: HashMap::new(),
             pending_image_fetches: HashSet::new(),
+            preview_paths: HashSet::new(),
             selected_row: None,
             viewed: ViewedStore::load(),
             auto_viewed_done: HashSet::new(),
@@ -949,6 +954,50 @@ impl DifitApp {
         Some((file.path.clone(), old_ref, new_ref))
     }
 
+    fn maybe_fetch_notebook_blob_for_active(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.current_file_path() else { return };
+        let ext = path
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !is_notebook_ext(&ext) {
+            return;
+        }
+        let ref_name = self.expansion_ref();
+        self.ensure_image_blob(path, ref_name, cx);
+    }
+
+    fn active_notebook_bytes(&self) -> Option<Arc<Vec<u8>>> {
+        let path = self.current_file_path()?;
+        let ext = path
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !is_notebook_ext(&ext) {
+            return None;
+        }
+        let ref_name = self.expansion_ref();
+        self.image_blob_cache.get(&(path, ref_name)).cloned()
+    }
+
+    fn maybe_fetch_markdown_blob_for_active(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.current_file_path() else { return };
+        if !is_markdown_path(&path) || !self.preview_paths.contains(&path) {
+            return;
+        }
+        let ref_name = self.expansion_ref();
+        self.ensure_image_blob(path, ref_name, cx);
+    }
+
+    fn active_markdown_preview_bytes(&self) -> Option<Arc<Vec<u8>>> {
+        let path = self.current_file_path()?;
+        if !is_markdown_path(&path) || !self.preview_paths.contains(&path) {
+            return None;
+        }
+        let ref_name = self.expansion_ref();
+        self.image_blob_cache.get(&(path, ref_name)).cloned()
+    }
+
     fn maybe_fetch_image_blobs_for_active(&mut self, cx: &mut Context<Self>) {
         let Some((path, old_ref, new_ref)) = self.active_image_path_and_refs() else {
             return;
@@ -1002,6 +1051,22 @@ impl DifitApp {
             }
         })
         .detach();
+    }
+
+    fn toggle_preview_for_active(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.current_file_path() else { return };
+        if !is_markdown_path(&path) {
+            return;
+        }
+        if self.preview_paths.contains(&path) {
+            self.preview_paths.remove(&path);
+        } else {
+            self.preview_paths.insert(path.clone());
+            // Pull the new blob so the renderer has content to show.
+            let ref_name = self.expansion_ref();
+            self.ensure_image_blob(path, ref_name, cx);
+        }
+        cx.notify();
     }
 
     fn toggle_collapsed_at(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -1213,6 +1278,14 @@ impl DifitApp {
     }
 }
 
+fn is_markdown_path(path: &str) -> bool {
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(ext.as_str(), "md" | "markdown")
+}
+
 fn format_thread_prompt(thread: &DiffCommentThread) -> String {
     let line_label = match thread.position.line {
         DiffLineRange::Single(n) => format!("L{n}"),
@@ -1292,11 +1365,15 @@ impl Render for DifitApp {
         let actions = self.build_actions(&entity);
         let viewed_paths: HashSet<String> = self.viewed_paths_for_current_repo();
         let collapsed_snapshot: HashSet<String> = self.collapsed.clone();
-        // Trigger image blob fetches for the active file if it's an image
-        // and we don't have the bytes yet. Done before borrowing diff
-        // again below so `&mut self` is still available.
+        // Trigger image / markdown blob fetches for the active file if
+        // we don't have the bytes yet. Done before borrowing diff again
+        // below so `&mut self` is still available.
         self.maybe_fetch_image_blobs_for_active(cx);
+        self.maybe_fetch_markdown_blob_for_active(cx);
+        self.maybe_fetch_notebook_blob_for_active(cx);
         let (active_old_bytes, active_new_bytes) = self.active_image_blobs();
+        let active_markdown_preview = self.active_markdown_preview_bytes();
+        let active_notebook = self.active_notebook_bytes();
 
         // Avoid cloning the entire file list every frame — borrow it for
         // file_list rendering and active_file lookup via the same Arc.
@@ -1393,6 +1470,8 @@ impl Render for DifitApp {
                         font_size,
                         active_old_bytes,
                         active_new_bytes,
+                        active_markdown_preview,
+                        active_notebook,
                         &entity,
                         actions,
                         cx,
@@ -1502,6 +1581,8 @@ impl DifitApp {
         font_size: f32,
         old_image_bytes: Option<Arc<Vec<u8>>>,
         new_image_bytes: Option<Arc<Vec<u8>>>,
+        markdown_preview_bytes: Option<Arc<Vec<u8>>>,
+        notebook_bytes: Option<Arc<Vec<u8>>>,
         entity: &Entity<DifitApp>,
         actions: DiffActions,
         _cx: &mut Context<Self>,
@@ -1531,6 +1612,23 @@ impl DifitApp {
                     old_image_bytes,
                     new_image_bytes,
                 ));
+            } else if !collapsed && is_notebook_ext(&viewer_extension) {
+                if let Some(bytes) = notebook_bytes {
+                    col = col.child(render_notebook(&bytes, font_size));
+                } else {
+                    col = col.child(render_diff(
+                        Some(file),
+                        rendered,
+                        thread_count,
+                        collapsed,
+                        font_size,
+                        actions,
+                    ));
+                }
+            } else if !collapsed && markdown_preview_bytes.is_some() {
+                let bytes = markdown_preview_bytes.unwrap();
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                col = col.child(render_markdown(&text, font_size));
             } else {
                 col = col.child(render_diff(
                     Some(file),
@@ -1626,6 +1724,11 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let entity_help = entity.clone();
     let entity_threads = entity.clone();
     let entity_settings = entity.clone();
+    let entity_preview = entity.clone();
+    let active_is_md = active_path
+        .as_deref()
+        .map(is_markdown_path)
+        .unwrap_or(false);
     let active_path_for_open = active_path.clone();
     let active_path_for_copy = active_path;
 
@@ -1732,6 +1835,14 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
                 entity.update(cx, |this, cx| this.refresh_diff(cx));
             }
         }))
+        .child(header_button_enabled(
+            "preview",
+            "Preview",
+            active_is_md,
+            move |cx: &mut App| {
+                entity_preview.update(cx, |this, cx| this.toggle_preview_for_active(cx));
+            },
+        ))
         .child(header_button_enabled(
             "open-editor",
             "Open in editor",
