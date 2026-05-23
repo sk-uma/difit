@@ -39,10 +39,9 @@ pub fn render_file_list(
         .filter(|(_, f)| filter_lc.is_empty() || f.path.to_ascii_lowercase().contains(&filter_lc))
         .collect();
 
-    let viewed_count = matches
-        .iter()
-        .filter(|(_, f)| viewed.contains(&f.path))
-        .count();
+    let _ = viewed; // suppressed: counter dropped in favor of +/- totals
+    let total_additions: u32 = files.iter().map(|f| f.additions).sum();
+    let total_deletions: u32 = files.iter().map(|f| f.deletions).sum();
 
     let tree = build_tree(&matches);
 
@@ -71,7 +70,12 @@ pub fn render_file_list(
         .border_color(Theme::BORDER)
         .font_family(UI_FONT())
         .text_color(Theme::TEXT)
-        .child(sidebar_header(total, viewed_count, filter_input))
+        .child(sidebar_header(
+            total,
+            total_additions,
+            total_deletions,
+            filter_input,
+        ))
         .child(
             div()
                 .id("file-list-scroll")
@@ -133,17 +137,20 @@ fn sidebar_footer(on_open_shortcuts: impl Fn(&mut App) + 'static) -> impl IntoEl
 
 fn sidebar_header(
     total: usize,
-    viewed: usize,
+    total_additions: u32,
+    total_deletions: u32,
     filter_input: Option<Entity<TextInput>>,
 ) -> impl IntoElement {
+    use crate::ui::widgets::icon;
     let mut header = div()
-        .px_3()
-        .py_2()
+        .px(px(16.0))
+        .py(px(12.0))
         .border_b_1()
         .border_color(Theme::BORDER)
+        .bg(Theme::BG_HOVER)
         .flex()
         .flex_col()
-        .gap_2()
+        .gap(px(12.0))
         .child(
             div()
                 .flex()
@@ -154,18 +161,33 @@ fn sidebar_header(
                     div()
                         .flex_1()
                         .text_color(Theme::TEXT)
-                        .text_size(px(12.0))
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(SharedString::from(format!("Files changed ({})", total))),
                 )
                 .child(
                     div()
-                        .text_color(Theme::TEXT_MUTED)
+                        .flex()
+                        .flex_row()
+                        .gap_1()
                         .text_size(px(11.0))
-                        .child(SharedString::from(format!("{viewed}/{total} viewed"))),
+                        .child(
+                            div()
+                                .text_color(Theme::FILE_STATUS_ADD)
+                                .child(SharedString::from(format!("+{total_additions}"))),
+                        )
+                        .child(
+                            div()
+                                .text_color(Theme::FILE_STATUS_DEL)
+                                .child(SharedString::from(format!("-{total_deletions}"))),
+                        ),
                 ),
         );
 
     if let Some(input) = filter_input {
+        // React wraps the input with a Search icon absolutely-positioned
+        // on the left. Replicate with a relative wrapper.
+        let _ = icon;
         header = header.child(div().w_full().child(input));
     }
 
@@ -309,22 +331,28 @@ fn render_nodes(
                 out.push(
                     div()
                         .id(ElementId::Name(SharedString::from(format!("dir-{path}"))))
-                        .px_3()
-                        .py_1()
+                        .h(px(36.0))
+                        .px(px(16.0))
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .pl(px(depth as f32 * 12.0 + 8.0))
+                        .pl(px(depth as f32 * 12.0 + 16.0))
+                        .bg(Theme::BG_ELEVATED)
                         .cursor_pointer()
                         .hover(|s| s.bg(Theme::BG_HOVER))
                         .on_click(move |_e, _w, cx| cb(path_owned.clone(), cx))
-                        .child(icon(chevron_name, 12.0, Theme::TEXT_MUTED))
-                        .child(icon(folder_name, 14.0, Theme::TEXT_MUTED))
+                        .child(icon(chevron_name, 16.0, Theme::TEXT_MUTED))
+                        .child(icon(folder_name, 16.0, Theme::TEXT_MUTED))
                         .child(
                             div()
-                                .text_color(Theme::TEXT_MUTED)
-                                .text_size(px(12.5))
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_color(Theme::TEXT)
+                                .text_size(px(13.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .child(SharedString::from(name.clone())),
                         )
                         .into_any_element(),
@@ -395,8 +423,11 @@ fn file_row(
     on_toggle_viewed: impl Fn(usize, &mut App) + 'static,
     on_toggle_collapsed: impl Fn(usize, &mut App) + 'static,
 ) -> impl IntoElement {
+    // React uses the same `bg-github-bg-tertiary` for selected and
+    // hover, and there's no border between file rows. Reviewed files
+    // drop to opacity-70 and the filename gets a strikethrough.
     let bg = if selected {
-        Theme::BG_SELECTED
+        Theme::BG_HOVER
     } else {
         Theme::BG_ELEVATED
     };
@@ -404,20 +435,31 @@ fn file_row(
     let toggle_v_id = ElementId::Name(SharedString::from(format!("file-viewed-{file_idx}")));
     let toggle_c_id = ElementId::Name(SharedString::from(format!("file-collapsed-{file_idx}")));
     let text_color = if viewed { Theme::TEXT_MUTED } else { Theme::TEXT };
+    let mut name_text = div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(13.0))
+        .text_color(text_color)
+        .child(SharedString::from(name.to_string()));
+    if viewed {
+        name_text = name_text.line_through();
+    }
+    let row_opacity = if viewed { 0.7 } else { 1.0 };
 
     div()
         .id(id)
-        .px_2()
-        .py_1()
+        .px(px(16.0))
+        .py(px(6.0))
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
-        .pl(px(depth as f32 * 12.0 + 4.0))
+        .pl(px(depth as f32 * 12.0 + 8.0))
         .bg(bg)
+        .opacity(row_opacity)
         .hover(|s| s.bg(Theme::BG_HOVER))
-        .border_b_1()
-        .border_color(Theme::BORDER)
         .cursor_pointer()
         .on_click(move |_event, _window, cx| on_select(file_idx, cx))
         .child(collapse_chevron(toggle_c_id, collapsed, move |cx| {
@@ -427,16 +469,7 @@ fn file_row(
             on_toggle_viewed(file_idx, cx)
         }))
         .child(status_badge(status))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(12.5))
-                .text_color(text_color)
-                .child(SharedString::from(name.to_string())),
-        )
+        .child(name_text)
         .child(
             div()
                 .flex()
