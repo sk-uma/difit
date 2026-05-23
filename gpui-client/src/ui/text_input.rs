@@ -701,36 +701,40 @@ impl Element for TextElement {
 
         // Build cursor + selection quads.
         let mut selections = Vec::new();
-        let cursor = if use_placeholder {
-            // No caret when showing placeholder (but still position it at 0
-            // for accessibility).
-            None
-        } else {
-            // Selection painting first.
-            if !selected_range.is_empty() {
-                for (idx, ll) in layouts.iter().enumerate() {
-                    let line_top = bounds.top() + line_height * (idx as f32);
-                    let line_bottom = line_top + line_height;
-                    let start = selected_range.start.max(ll.range.start);
-                    let end = selected_range.end.min(ll.range.end);
-                    if start >= end {
-                        continue;
-                    }
-                    let x_start = bounds.left() + ll.line.x_for_index(start - ll.range.start);
-                    let x_end = bounds.left() + ll.line.x_for_index(end - ll.range.start);
-                    selections.push(fill(
-                        Bounds::from_corners(point(x_start, line_top), point(x_end, line_bottom)),
-                        selection_color(),
-                    ));
+        // Draw the caret even when the placeholder is showing — an empty
+        // focused input still needs a visible insertion point. Selection
+        // overlay only makes sense for real content.
+        if !use_placeholder && !selected_range.is_empty() {
+            for (idx, ll) in layouts.iter().enumerate() {
+                let line_top = bounds.top() + line_height * (idx as f32);
+                let line_bottom = line_top + line_height;
+                let start = selected_range.start.max(ll.range.start);
+                let end = selected_range.end.min(ll.range.end);
+                if start >= end {
+                    continue;
                 }
+                let x_start = bounds.left() + ll.line.x_for_index(start - ll.range.start);
+                let x_end = bounds.left() + ll.line.x_for_index(end - ll.range.start);
+                selections.push(fill(
+                    Bounds::from_corners(point(x_start, line_top), point(x_end, line_bottom)),
+                    selection_color(),
+                ));
             }
+        }
 
-            // Cursor caret.
+        let cursor = {
+            // Cursor caret. For empty / placeholder content the layout
+            // is still a single empty line, so position 0 lands at
+            // bounds.left() + 0.
             let (line_idx, in_line) = locate(&layouts, cursor_offset);
             let line_top = bounds.top() + line_height * (line_idx as f32);
             let line_bottom = line_top + line_height;
             let layout = &layouts[line_idx];
-            let cursor_x = bounds.left() + layout.line.x_for_index(in_line);
+            let cursor_x = if use_placeholder {
+                bounds.left()
+            } else {
+                bounds.left() + layout.line.x_for_index(in_line)
+            };
             Some(fill(
                 Bounds::new(
                     point(cursor_x, line_top),
