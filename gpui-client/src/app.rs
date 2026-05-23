@@ -31,8 +31,9 @@ use crate::settings_store::{self, Settings};
 use crate::ui::settings_modal::render_settings_modal;
 use crate::ui::text_input::{InputMode, TextInput};
 use crate::ui::theme::{Theme, UI_FONT};
+use crate::ui::quick_menu::{render_quick_menu, Preset as QuickPreset};
 use crate::ui::widgets::{
-    checkbox, icon_button, label_tooltip, logo, pill_toggle, reviewing_label, viewed_progress,
+    checkbox, icon_button, label_tooltip, logo, pill_toggle, viewed_progress,
 };
 use crate::viewed_store::{is_auto_viewed, ViewedStore};
 
@@ -48,6 +49,7 @@ pub struct DifitApp {
     view_mode: DiffViewMode,
     revisions: Option<Arc<RevisionsResponse>>,
     base_picker_open: bool,
+    quick_menu_open: bool,
     target_picker_open: bool,
     selected_base: Option<String>,
     selected_target: Option<String>,
@@ -163,6 +165,7 @@ impl DifitApp {
             view_mode: DiffViewMode::Unified,
             revisions: None,
             base_picker_open: false,
+            quick_menu_open: false,
             target_picker_open: false,
             selected_base: None,
             selected_target: None,
@@ -1598,6 +1601,10 @@ impl Render for DifitApp {
                 ),
                 sidebar_open: self.sidebar_open,
                 sidebar_width: 280.0,
+                revisions: self.revisions.clone(),
+                selected_base: self.selected_base.clone(),
+                selected_target: self.selected_target.clone(),
+                quick_menu_open: self.quick_menu_open,
                 entity: entity.clone(),
             }))
             .child({
@@ -1895,6 +1902,10 @@ struct HeaderInputs {
     commit_text: SharedString,
     sidebar_open: bool,
     sidebar_width: f32,
+    revisions: Option<Arc<RevisionsResponse>>,
+    selected_base: Option<String>,
+    selected_target: Option<String>,
+    quick_menu_open: bool,
     entity: Entity<DifitApp>,
 }
 
@@ -1908,6 +1919,10 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         commit_text,
         sidebar_open,
         sidebar_width,
+        revisions,
+        selected_base,
+        selected_target,
+        quick_menu_open,
         entity,
     } = inputs;
 
@@ -2047,12 +2062,46 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         .gap(px(16.0))
         .child(right_cluster_threads)
         .child(viewed_progress(viewed_count, total_files))
-        .child(reviewing_label(commit_text, move |cx: &mut App| {
-            entity_review.update(cx, |this, cx| {
-                this.show_revision_modal = !this.show_revision_modal;
-                cx.notify();
-            });
-        }));
+        .child({
+            let entity_toggle = entity_review.clone();
+            let entity_apply = entity_review.clone();
+            let entity_detailed = entity_review.clone();
+            let entity_dismiss = entity_review.clone();
+            render_quick_menu(
+                commit_text,
+                revisions.as_ref(),
+                selected_base.as_deref(),
+                selected_target.as_deref(),
+                quick_menu_open,
+                move |cx: &mut App| {
+                    entity_toggle.update(cx, |this, cx| {
+                        this.quick_menu_open = !this.quick_menu_open;
+                        cx.notify();
+                    });
+                },
+                move |preset: QuickPreset, cx: &mut App| {
+                    entity_apply.update(cx, |this, cx| {
+                        this.selected_base = Some(preset.base);
+                        this.selected_target = Some(preset.target);
+                        this.quick_menu_open = false;
+                        this.refresh_diff(cx);
+                    });
+                },
+                move |cx: &mut App| {
+                    entity_detailed.update(cx, |this, cx| {
+                        this.quick_menu_open = false;
+                        this.show_revision_modal = true;
+                        cx.notify();
+                    });
+                },
+                move |cx: &mut App| {
+                    entity_dismiss.update(cx, |this, cx| {
+                        this.quick_menu_open = false;
+                        cx.notify();
+                    });
+                },
+            )
+        });
 
     // The two clusters lay out on a single row when the window is wide
     // and wrap to a second row when it's narrow (React uses

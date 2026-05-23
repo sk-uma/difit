@@ -10,6 +10,7 @@ pub mod image_viewer;
 pub mod keybindings;
 pub mod markdown_view;
 pub mod notebook_view;
+pub mod quick_menu;
 pub mod revision_modal;
 pub mod revision_picker;
 pub mod settings_modal;
