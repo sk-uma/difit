@@ -381,6 +381,8 @@ fn file_row(
             div()
                 .flex_1()
                 .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_size(px(12.5))
                 .text_color(text_color)
                 .child(SharedString::from(name.to_string())),
@@ -388,15 +390,18 @@ fn file_row(
         .child(
             div()
                 .flex()
+                .flex_shrink_0()
                 .gap_1()
                 .text_size(px(10.0))
                 .child(
                     div()
+                        .whitespace_nowrap()
                         .text_color(Theme::FILE_STATUS_ADD)
                         .child(SharedString::from(format!("+{additions}"))),
                 )
                 .child(
                     div()
+                        .whitespace_nowrap()
                         .text_color(Theme::FILE_STATUS_DEL)
                         .child(SharedString::from(format!("-{deletions}"))),
                 ),

@@ -308,6 +308,8 @@ fn render_file_header(data: &FileHeaderData, actions: &DiffActions) -> impl Into
             div()
                 .flex_1()
                 .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_size(px(13.0))
                 .text_color(if data.viewed {
                     Theme::TEXT_MUTED
@@ -318,12 +320,16 @@ fn render_file_header(data: &FileHeaderData, actions: &DiffActions) -> impl Into
         )
         .child(
             div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
                 .text_color(Theme::FILE_STATUS_ADD)
                 .text_size(px(11.0))
                 .child(SharedString::from(format!("+{}", data.additions))),
         )
         .child(
             div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
                 .text_color(Theme::FILE_STATUS_DEL)
                 .text_size(px(11.0))
                 .child(SharedString::from(format!("-{}", data.deletions))),
@@ -590,10 +596,17 @@ fn styled_text(cell: &RenderedCell) -> StyledText {
     }
 }
 
+/// Line-number gutter. 64px is wide enough for 5-digit numbers at the
+/// default mono font size; tight wrapping was making "1234" stack as
+/// "123\n4" in tall files.
 fn gutter(label: SharedString) -> impl IntoElement {
     div()
-        .w(px(48.0))
+        .w(px(64.0))
+        .flex_shrink_0()
         .px_2()
+        .text_align(gpui::TextAlign::Right)
+        .whitespace_nowrap()
+        .overflow_hidden()
         .text_color(Theme::TEXT_MUTED)
         .child(label)
 }
@@ -667,7 +680,7 @@ fn expand_row(
             // Left gutter: matches the line-number column width so the
             // icon lines up with the diff numbers.
             div()
-                .w(px(48.0))
+                .w(px(64.0))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
