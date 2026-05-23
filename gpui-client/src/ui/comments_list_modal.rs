@@ -10,8 +10,10 @@ use crate::ui::theme::{Theme, UI_FONT};
 pub fn render_comments_list_modal(
     threads: Arc<Vec<DiffCommentThread>>,
     on_jump: impl Fn(String, &mut App) + 'static + Clone,
-    on_close: impl Fn(&mut App) + 'static,
+    on_close: impl Fn(&mut App) + 'static + Clone,
 ) -> impl IntoElement {
+    let close_backdrop = on_close.clone();
+    let close_button = on_close;
     div()
         .id("comments-list-modal")
         .absolute()
@@ -22,31 +24,56 @@ pub fn render_comments_list_modal(
         .bg(gpui::hsla(0.0, 0.0, 0.0, 0.5))
         .on_mouse_down(
             gpui::MouseButton::Left,
-            move |_e, _w, cx| on_close(cx),
+            move |_e, _w, cx| close_backdrop(cx),
         )
         .child(
             div()
-                .w(px(640.0))
-                .max_h(px(560.0))
-                .p_4()
-                .bg(Theme::BG_ELEVATED)
+                .id("comments-list-card")
+                .w(px(720.0))
+                .max_h(px(640.0))
+                .bg(Theme::BG)
                 .border_1()
                 .border_color(Theme::BORDER)
                 .rounded_md()
                 .shadow_lg()
                 .font_family(UI_FONT())
-                .text_size(px(12.5))
                 .text_color(Theme::TEXT)
+                .on_mouse_down(gpui::MouseButton::Left, |_e, _w, _cx| {})
                 .flex()
                 .flex_col()
-                .gap_2()
                 .child(
                     div()
-                        .text_size(px(14.0))
-                        .child(SharedString::from(format!(
-                            "All comments ({})",
-                            threads.len()
-                        ))),
+                        .px(px(24.0))
+                        .py(px(16.0))
+                        .border_b_1()
+                        .border_color(Theme::BORDER)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(SharedString::from(format!(
+                                    "All comments ({})",
+                                    threads.len()
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .id("comments-list-close")
+                                .p_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(Theme::BG_HOVER))
+                                .on_click(move |_e, _w, cx| close_button(cx))
+                                .child(crate::ui::widgets::icon(
+                                    "x",
+                                    18.0,
+                                    Theme::TEXT_MUTED,
+                                )),
+                        ),
                 )
                 .child(
                     div()
@@ -54,9 +81,11 @@ pub fn render_comments_list_modal(
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .px(px(24.0))
+                        .py(px(16.0))
                         .flex()
                         .flex_col()
-                        .gap_2()
+                        .gap(px(8.0))
                         .children(threads.iter().enumerate().map(|(idx, thread)| {
                             let jump = on_jump.clone();
                             let path = thread.file_path.clone();

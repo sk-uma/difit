@@ -2,12 +2,15 @@ use gpui::{div, prelude::*, px, App, ElementId, IntoElement, ParentElement, Shar
 
 use crate::settings_store::{Settings, FONT_SIZES, SYNTAX_THEMES};
 use crate::ui::theme::{Theme, UI_FONT};
+use crate::ui::widgets::icon;
 
 pub fn render_settings_modal(
     settings: Settings,
     on_apply: impl Fn(Settings, &mut App) + 'static + Clone,
-    on_close: impl Fn(&mut App) + 'static,
+    on_close: impl Fn(&mut App) + 'static + Clone,
 ) -> impl IntoElement {
+    let close_backdrop = on_close.clone();
+    let close_button = on_close;
     div()
         .id("settings-modal")
         .absolute()
@@ -18,39 +21,67 @@ pub fn render_settings_modal(
         .bg(gpui::hsla(0.0, 0.0, 0.0, 0.5))
         .on_mouse_down(
             gpui::MouseButton::Left,
-            move |_e, _w, cx| on_close(cx),
+            move |_e, _w, cx| close_backdrop(cx),
         )
         .child(
             div()
-                .w(px(420.0))
-                .max_h(px(560.0))
-                .p_4()
-                .bg(Theme::BG_ELEVATED)
+                .id("settings-modal-card")
+                .w(px(520.0))
+                .max_h(px(640.0))
+                .bg(Theme::BG)
                 .border_1()
                 .border_color(Theme::BORDER)
                 .rounded_md()
                 .shadow_lg()
                 .font_family(UI_FONT())
-                .text_size(px(12.5))
                 .text_color(Theme::TEXT)
+                .on_mouse_down(gpui::MouseButton::Left, |_e, _w, _cx| {})
                 .flex()
                 .flex_col()
-                .gap_3()
                 .child(
                     div()
-                        .text_size(px(14.0))
-                        .child(SharedString::from("Settings")),
+                        .px(px(24.0))
+                        .py(px(16.0))
+                        .border_b_1()
+                        .border_color(Theme::BORDER)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(SharedString::from("Settings")),
+                        )
+                        .child(
+                            div()
+                                .id("settings-close")
+                                .p_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(Theme::BG_HOVER))
+                                .on_click(move |_e, _w, cx| close_button(cx))
+                                .child(icon("x", 18.0, Theme::TEXT_MUTED)),
+                        ),
                 )
-                .child(font_size_row(&settings, on_apply.clone()))
-                .child(theme_row(&settings, on_apply))
                 .child(
                     div()
-                        .mt_2()
-                        .text_color(Theme::TEXT_MUTED)
-                        .text_size(px(11.0))
-                        .child(SharedString::from(
-                            "Saved to settings.json in the OS config dir.",
-                        )),
+                        .px(px(24.0))
+                        .py(px(20.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(20.0))
+                        .child(font_size_row(&settings, on_apply.clone()))
+                        .child(theme_row(&settings, on_apply))
+                        .child(
+                            div()
+                                .text_color(Theme::TEXT_MUTED)
+                                .text_size(px(11.0))
+                                .child(SharedString::from(
+                                    "Saved to settings.json in the OS config dir.",
+                                )),
+                        ),
                 ),
         )
 }
@@ -121,16 +152,13 @@ fn theme_row(
 }
 
 fn section(label: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_color(Theme::TEXT_MUTED)
-                .text_size(px(11.0))
-                .child(SharedString::from(label)),
-        )
+    div().flex().flex_col().gap(px(8.0)).child(
+        div()
+            .text_color(Theme::TEXT)
+            .text_size(px(13.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(SharedString::from(label)),
+    )
 }
 
 fn pill(
