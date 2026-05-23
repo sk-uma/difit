@@ -1876,19 +1876,11 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
                             cx.notify();
                         });
                     },
-                ))
-                .child(icon_button(
-                    "help-btn",
-                    "help",
-                    "Keyboard shortcuts",
-                    move |cx: &mut App| {
-                        entity_help.update(cx, |this, cx| {
-                            this.show_help = !this.show_help;
-                            cx.notify();
-                        });
-                    },
                 )),
+            // Help button removed — Shortcuts now lives in the sidebar
+            // footer, matching React's App.tsx layout.
         );
+        let _ = entity_help;
 
     // Vertical divider matching React's 4px / inset-8px bar.
     let divider = div()
