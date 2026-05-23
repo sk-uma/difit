@@ -780,7 +780,6 @@ impl DifitApp {
             ExpandDirection::Below => counts.1 = counts.1.saturating_add(inc),
         }
         self.expansion_version = self.expansion_version.wrapping_add(1);
-        self.rendered_cache = None;
         self.ensure_blob(file_path, ref_name, cx);
         cx.notify();
     }
@@ -792,7 +791,6 @@ impl DifitApp {
             log::warn!("settings save failed: {e:#}");
         }
         self.settings_version = self.settings_version.wrapping_add(1);
-        self.rendered_cache = None;
         cx.notify();
     }
 
@@ -834,7 +832,6 @@ impl DifitApp {
         cx: &mut Context<Self>,
     ) {
         self.view_mode = self.view_mode.toggle();
-        self.rendered_cache = None;
         cx.notify();
     }
     fn on_toggle_ignore_whitespace(
@@ -970,7 +967,6 @@ impl DifitApp {
         if self.selected != Some(next) {
             self.selected = Some(next);
             self.selected_row = None;
-            self.rendered_cache = None;
             self.composing = None;
             cx.notify();
         }
@@ -993,7 +989,6 @@ impl DifitApp {
         };
         if self.selected != Some(idx) {
             self.selected = Some(idx);
-            self.rendered_cache = None;
             self.composing = None;
         }
         self.show_comments_list = false;
@@ -1359,6 +1354,14 @@ impl DifitApp {
             .unwrap_or(true);
 
         if needs_rebuild {
+            // Snapshot the prior scroll position so cache invalidations
+            // (Expand, toggle collapsed/viewed, view-mode change, …)
+            // don't yank the viewport back to the top.
+            let prev_scroll = self
+                .rendered_cache
+                .as_ref()
+                .map(|c| c.list_state.logical_scroll_top());
+
             let viewed = self.viewed_paths_for_current_repo();
             let ctx = BuildContext {
                 mode: self.view_mode,
@@ -1383,6 +1386,13 @@ impl DifitApp {
             // the thumb position is a per-item approximation rather than
             // pixel-perfect).
             let list_state = ListState::new(item_count, ListAlignment::Top, px(400.0));
+            if let Some(prev) = prev_scroll {
+                let clamped_ix = prev.item_ix.min(item_count.saturating_sub(1));
+                list_state.scroll_to(gpui::ListOffset {
+                    item_ix: clamped_ix,
+                    offset_in_item: prev.offset_in_item,
+                });
+            }
             self.rendered_cache = Some(RenderedCacheEntry {
                 key,
                 rows: Arc::new(rows),
@@ -1398,8 +1408,11 @@ impl DifitApp {
     }
 
     fn bump_ui(&mut self) {
+        // Just bump the counter — `ensure_rendered` notices the cache
+        // key mismatch and rebuilds while preserving scroll position.
+        // Clearing the cache here would drop the ListState (and with it
+        // the scroll offset) before `ensure_rendered` could read it.
         self.ui_version = self.ui_version.wrapping_add(1);
-        self.rendered_cache = None;
     }
 }
 
@@ -1901,7 +1914,6 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
             move |cx: &mut App| {
                 entity_view_pill.update(cx, |this, cx| {
                     this.view_mode = this.view_mode.toggle();
-                    this.rendered_cache = None;
                     cx.notify();
                 });
             },
