@@ -49,7 +49,7 @@ pub fn render_image_diff(
         .flex_row()
         .min_h_0()
         .min_w_0()
-        .font_family(UI_FONT)
+        .font_family(UI_FONT())
         .text_color(Theme::TEXT)
         .child(if show_old {
             image_pane(

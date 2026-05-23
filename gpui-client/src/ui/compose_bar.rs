@@ -45,7 +45,7 @@ pub fn render_compose_bar(
         .bg(Theme::BG_ELEVATED)
         .border_t_1()
         .border_color(Theme::BORDER)
-        .font_family(UI_FONT)
+        .font_family(UI_FONT())
         .text_color(Theme::TEXT)
         .text_size(px(12.0))
         .child(

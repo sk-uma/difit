@@ -53,6 +53,16 @@ fn main() -> Result<()> {
     crate::settings_store::install(crate::settings_store::Settings::load());
 
     application().with_assets(crate::assets::EmbeddedAssets).run(move |cx: &mut App| {
+        // Pick concrete font names from what's actually installed.
+        // `font_family(...)` matches a single name, so the multi-candidate
+        // fallback has to happen here, not in CSS-style string stacks.
+        crate::ui::theme::resolve_fonts(cx);
+        log::info!(
+            "fonts: mono={} ui={}",
+            crate::ui::theme::MONO_FONT(),
+            crate::ui::theme::UI_FONT()
+        );
+
         crate::ui::text_input::bind_keys(cx);
         crate::ui::keybindings::bind_keys(cx);
 

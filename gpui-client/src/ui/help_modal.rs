@@ -38,7 +38,7 @@ pub fn render_help_modal(on_close: impl Fn(&mut App) + 'static) -> impl IntoElem
                 .border_color(Theme::BORDER)
                 .rounded_md()
                 .shadow_lg()
-                .font_family(UI_FONT)
+                .font_family(UI_FONT())
                 .text_size(px(12.5))
                 .text_color(Theme::TEXT)
                 .flex()

@@ -1545,7 +1545,7 @@ impl Render for DifitApp {
             .on_action(cx.listener(Self::on_escape))
             .bg(Theme::BG)
             .text_color(Theme::TEXT)
-            .font_family(UI_FONT)
+            .font_family(UI_FONT())
             .child(render_header(HeaderInputs {
                 view_mode,
                 ignore_whitespace,

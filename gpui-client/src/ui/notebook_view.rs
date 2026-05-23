@@ -43,7 +43,7 @@ pub fn render_notebook(blob_bytes: &[u8], font_size: f32) -> impl IntoElement {
         .overflow_y_scroll()
         .px_4()
         .py_3()
-        .font_family(UI_FONT)
+        .font_family(UI_FONT())
         .text_color(Theme::TEXT)
         .text_size(px(font_size))
         .flex()
@@ -104,7 +104,7 @@ fn render_cell(idx: usize, cell: Cell, font_size: f32) -> gpui::AnyElement {
                         .px_2()
                         .py_1()
                         .bg(Theme::BG_ELEVATED)
-                        .font_family(MONO_FONT)
+                        .font_family(MONO_FONT())
                         .text_size(px(font_size * 0.95))
                         .text_color(Theme::TEXT)
                         .child(SharedString::from(source)),
@@ -173,7 +173,7 @@ fn render_output(out: &Value, font_size: f32) -> gpui::AnyElement {
         } else {
             Theme::BORDER
         })
-        .font_family(MONO_FONT)
+        .font_family(MONO_FONT())
         .text_size(px(font_size * 0.95))
         .text_color(if is_error {
             Theme::FILE_STATUS_DEL

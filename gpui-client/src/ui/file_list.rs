@@ -68,7 +68,7 @@ pub fn render_file_list(
         .bg(Theme::BG_ELEVATED)
         .border_r_1()
         .border_color(Theme::BORDER)
-        .font_family(UI_FONT)
+        .font_family(UI_FONT())
         .text_color(Theme::TEXT)
         .child(sidebar_header(total, viewed_count, filter_input))
         .child(

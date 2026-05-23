@@ -39,6 +39,78 @@ const fn rgb(hex: u32) -> Rgba {
     }
 }
 
-/// Monospace font stack matched to what the React side uses for code.
-pub const MONO_FONT: &str = "Consolas, ui-monospace, SFMono-Regular, Menlo, monospace";
-pub const UI_FONT: &str = "Segoe UI, system-ui, sans-serif";
+use std::sync::RwLock;
+
+use gpui::{App, SharedString};
+
+/// Ordered list of preferred monospace fonts. `resolve_fonts` picks the
+/// first one that's actually installed on the system.
+const MONO_CANDIDATES: &[&str] = &[
+    "Zed Plex Mono",
+    "IBM Plex Mono",
+    "JetBrains Mono",
+    "JetBrainsMono Nerd Font",
+    "Cascadia Code",
+    "Cascadia Mono",
+    "Fira Code",
+    "Source Code Pro",
+    "Menlo",
+    "Consolas",
+];
+/// Ordered list of preferred UI sans fonts.
+const UI_CANDIDATES: &[&str] = &[
+    "Inter",
+    "Zed Sans",
+    "IBM Plex Sans",
+    "Segoe UI Variable",
+    "Segoe UI",
+    "SF Pro Display",
+    "Helvetica Neue",
+    "Arial",
+];
+
+const MONO_FALLBACK: &str = "Consolas";
+const UI_FALLBACK: &str = "Segoe UI";
+
+static MONO_FONT_RESOLVED: RwLock<Option<SharedString>> = RwLock::new(None);
+static UI_FONT_RESOLVED: RwLock<Option<SharedString>> = RwLock::new(None);
+
+/// Inspect the platform's installed font list and pick the first match
+/// from each preferred ordering. GPUI's `font_family` takes a single
+/// family name (not a CSS-style stack), so we have to do the fallback
+/// ourselves at startup.
+pub fn resolve_fonts(cx: &App) {
+    let installed: std::collections::HashSet<String> =
+        cx.text_system().all_font_names().into_iter().collect();
+    let pick = |candidates: &[&str], fallback: &str| -> SharedString {
+        for name in candidates {
+            if installed.contains(*name) {
+                return SharedString::from(name.to_string());
+            }
+        }
+        SharedString::from(fallback.to_string())
+    };
+    *MONO_FONT_RESOLVED.write().unwrap() = Some(pick(MONO_CANDIDATES, MONO_FALLBACK));
+    *UI_FONT_RESOLVED.write().unwrap() = Some(pick(UI_CANDIDATES, UI_FALLBACK));
+}
+
+/// Resolved monospace font name; call sites pass it directly to
+/// `font_family(...)`. Keeps SHOUT_CASE for source-compat with prior
+/// const callers.
+#[allow(non_snake_case)]
+pub fn MONO_FONT() -> SharedString {
+    MONO_FONT_RESOLVED
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| SharedString::from(MONO_FALLBACK))
+}
+
+#[allow(non_snake_case)]
+pub fn UI_FONT() -> SharedString {
+    UI_FONT_RESOLVED
+        .read()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| SharedString::from(UI_FALLBACK))
+}

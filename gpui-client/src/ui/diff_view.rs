@@ -47,6 +47,8 @@ pub fn render_main_pane(
     font_size: f32,
     actions: DiffActions,
 ) -> impl IntoElement {
+    // Generous line-height (~1.55× the font size) matches Zed's buffer
+    // breathing room — diff lines are dense and otherwise feel cramped.
     let container = div()
         .flex_1()
         .h_full()
@@ -56,8 +58,9 @@ pub fn render_main_pane(
         .flex_col()
         .bg(Theme::BG)
         .text_color(Theme::TEXT)
-        .font_family(MONO_FONT)
-        .text_size(px(font_size));
+        .font_family(MONO_FONT())
+        .text_size(px(font_size))
+        .line_height(px((font_size * 1.55).round()));
 
     let Some(rendered) = rendered else {
         return container.child(empty_placeholder("Loading diff…"));

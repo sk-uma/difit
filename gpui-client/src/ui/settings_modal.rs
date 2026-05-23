@@ -30,7 +30,7 @@ pub fn render_settings_modal(
                 .border_color(Theme::BORDER)
                 .rounded_md()
                 .shadow_lg()
-                .font_family(UI_FONT)
+                .font_family(UI_FONT())
                 .text_size(px(12.5))
                 .text_color(Theme::TEXT)
                 .flex()

@@ -32,7 +32,7 @@ pub fn render_thread(thread: &DiffCommentThread, actions: &DiffActions) -> impl 
         .border_color(Theme::BORDER)
         .rounded_sm()
         .bg(Theme::BG_ELEVATED)
-        .font_family(UI_FONT)
+        .font_family(UI_FONT())
         .text_size(px(12.0))
         .text_color(Theme::TEXT)
         .child(

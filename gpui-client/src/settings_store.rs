@@ -30,7 +30,7 @@ impl Default for Settings {
 }
 
 fn default_font_size() -> f32 {
-    12.5
+    14.0
 }
 
 fn default_syntax_theme() -> String {
@@ -48,7 +48,12 @@ pub const SYNTAX_THEMES: &[&str] = &[
     "InspiredGitHub",
 ];
 
-pub const FONT_SIZES: &[(&str, f32)] = &[("Small", 11.0), ("Medium", 12.5), ("Large", 14.0)];
+pub const FONT_SIZES: &[(&str, f32)] = &[
+    ("Small", 12.0),
+    ("Medium", 14.0),
+    ("Large", 16.0),
+    ("Extra Large", 18.0),
+];
 
 impl Settings {
     pub fn load() -> Self {
@@ -94,7 +99,7 @@ fn config_dir() -> Option<PathBuf> {
 /// (which doesn't have access to `DifitApp`) read the current syntax
 /// theme without threading it through everything.
 pub static CURRENT_SETTINGS: RwLock<Settings> = RwLock::new(Settings {
-    font_size: 12.5,
+    font_size: 14.0,
     syntax_theme: String::new(),
 });
 

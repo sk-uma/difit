@@ -128,7 +128,7 @@ pub fn render_markdown(source: &str, font_size: f32) -> impl IntoElement {
         .overflow_y_scroll()
         .px_6()
         .py_4()
-        .font_family(UI_FONT)
+        .font_family(UI_FONT())
         .text_size(px(font_size))
         .text_color(Theme::TEXT)
         .flex()
@@ -197,7 +197,7 @@ fn render_block(block: Block, font_size: f32) -> gpui::AnyElement {
             .border_1()
             .border_color(Theme::BORDER)
             .rounded_sm()
-            .font_family(MONO_FONT)
+            .font_family(MONO_FONT())
             .text_size(px(font_size * 0.95))
             .text_color(Theme::TEXT)
             .child(
@@ -217,7 +217,7 @@ fn render_block(block: Block, font_size: f32) -> gpui::AnyElement {
             .border_1()
             .border_color(Theme::TEXT_LINK)
             .rounded_sm()
-            .font_family(MONO_FONT)
+            .font_family(MONO_FONT())
             .text_size(px(font_size * 0.95))
             .text_color(Theme::TEXT)
             .child(

@@ -248,7 +248,7 @@ pub fn reviewing_label(
                 .py(px(1.0))
                 .bg(Theme::BG_HOVER)
                 .rounded_xs()
-                .font_family(crate::ui::theme::MONO_FONT)
+                .font_family(crate::ui::theme::MONO_FONT())
                 .text_color(Theme::TEXT)
                 .child(commit_text),
         )
