@@ -744,7 +744,14 @@ impl DifitApp {
         }
         if let Some(cache) = self.rendered_cache.as_ref() {
             if let Some(&row) = cache.file_starts.get(&file_path) {
-                cache.list_state.scroll_to_reveal_item(row);
+                // `scroll_to_reveal_item` only ensures visibility, which
+                // can land the row at the *bottom* of the viewport when
+                // the user clicked from far away. We want the FileHeader
+                // pinned to the top, so use `scroll_to` directly.
+                cache.list_state.scroll_to(gpui::ListOffset {
+                    item_ix: row,
+                    offset_in_item: px(0.0),
+                });
             }
         }
         cx.notify();

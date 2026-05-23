@@ -130,8 +130,6 @@ pub fn build_all_rows(
     let mut starts: HashMap<String, usize> = HashMap::new();
 
     for (file_idx, file) in diff.files.iter().enumerate() {
-        starts.insert(file.path.clone(), rows.len());
-
         let thread_count = ctx
             .comments
             .iter()
@@ -147,6 +145,10 @@ pub fn build_all_rows(
         if file_idx > 0 {
             rows.push(DiffRow::Spacer);
         }
+
+        // Record the start AFTER the spacer so sidebar nav lands on the
+        // FileHeader row, not the blank gap before it.
+        starts.insert(file.path.clone(), rows.len());
 
         rows.push(DiffRow::FileHeader(FileHeaderData {
             file_idx,
