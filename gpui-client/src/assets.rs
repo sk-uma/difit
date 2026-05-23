@@ -56,8 +56,24 @@ const ICONS: &[(&str, &str)] = &[
     ("icons/info.svg", INFO),
     ("icons/help.svg", HELP_CIRCLE),
     ("icons/panel-left.svg", PANEL_LEFT),
+    ("icons/arrow-up-from-line.svg", ARROW_UP_FROM_LINE),
+    ("icons/arrow-down-from-line.svg", ARROW_DOWN_FROM_LINE),
+    ("icons/unfold-vertical.svg", UNFOLD_VERTICAL),
     ("icons/difit-logo.svg", DIFIT_LOGO),
 ];
+
+const ARROW_UP_FROM_LINE: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<path d="m18 9-6-6-6 6"/><path d="M12 3v14"/><path d="M5 21h14"/></svg>"#
+);
+const ARROW_DOWN_FROM_LINE: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<path d="M19 3H5"/><path d="M12 21V7"/><path d="m6 15 6 6 6-6"/></svg>"#
+);
+const UNFOLD_VERTICAL: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<path d="M12 22v-6"/><path d="M12 8V2"/><path d="M4 12H2"/><path d="M10 12H8"/><path d="M16 12h-2"/><path d="M22 12h-2"/><path d="m15 19-3 3-3-3"/><path d="m15 5-3-3-3 3"/></svg>"#
+);
 
 const SVG_HEADER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#;
 

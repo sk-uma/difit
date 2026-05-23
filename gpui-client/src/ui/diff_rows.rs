@@ -81,7 +81,9 @@ pub enum DiffRow {
         file_path: SharedString,
         chunk_idx: usize,
         direction: ExpandDirection,
-        label: SharedString,
+        /// How many lines are still hidden in this gap (0 = nothing to
+        /// expand; the row is dropped before reaching the renderer).
+        hidden_lines: u32,
     },
     /// Side-by-side image viewer for one image file.
     Image {
@@ -225,16 +227,30 @@ pub fn build_all_rows(
                 })
         });
 
+        let chunk_count = file.chunks.len();
         for (chunk_idx, chunk) in file.chunks.iter().enumerate() {
             let (above_count, below_count) = expansions.get(&chunk_idx).copied().unwrap_or((0, 0));
 
             if ctx.mode == DiffViewMode::Unified {
-                rows.push(DiffRow::Expand {
-                    file_path: path_shared.clone(),
-                    chunk_idx,
-                    direction: ExpandDirection::Above,
-                    label: SharedString::from(format!("▲ Expand {} lines above", expand_step())),
-                });
+                // Hidden lines above this chunk = gap between prev chunk
+                // end and this chunk start, minus what's already been
+                // expanded into.
+                let prev_end_new = if chunk_idx == 0 {
+                    0
+                } else {
+                    let prev = &file.chunks[chunk_idx - 1];
+                    prev.new_start + prev.new_lines - 1
+                };
+                let gap_above = chunk.new_start.saturating_sub(prev_end_new + 1);
+                let hidden_above = gap_above.saturating_sub(above_count);
+                if hidden_above > 0 {
+                    rows.push(DiffRow::Expand {
+                        file_path: path_shared.clone(),
+                        chunk_idx,
+                        direction: ExpandDirection::Above,
+                        hidden_lines: hidden_above,
+                    });
+                }
                 push_expanded_above(
                     &mut rows,
                     &path_shared,
@@ -268,12 +284,25 @@ pub fn build_all_rows(
                     new_blob_lines.as_deref(),
                     &extension,
                 );
-                rows.push(DiffRow::Expand {
-                    file_path: path_shared.clone(),
-                    chunk_idx,
-                    direction: ExpandDirection::Below,
-                    label: SharedString::from(format!("▼ Expand {} lines below", expand_step())),
-                });
+                let chunk_end_new = chunk.new_start + chunk.new_lines - 1;
+                // Hidden lines below = gap to next chunk; for the last
+                // chunk we don't know the file length so just allow
+                // expansion via a fixed step.
+                let gap_below = if chunk_idx + 1 < chunk_count {
+                    let next = &file.chunks[chunk_idx + 1];
+                    next.new_start.saturating_sub(chunk_end_new + 1)
+                } else {
+                    expand_step() * 4 // sentinel; lets user expand further
+                };
+                let hidden_below = gap_below.saturating_sub(below_count);
+                if hidden_below > 0 {
+                    rows.push(DiffRow::Expand {
+                        file_path: path_shared.clone(),
+                        chunk_idx,
+                        direction: ExpandDirection::Below,
+                        hidden_lines: hidden_below,
+                    });
+                }
             }
         }
     }

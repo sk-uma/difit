@@ -217,8 +217,8 @@ fn render_row(row: &DiffRow, ix: usize, font_size: f32, actions: &DiffActions) -
             file_path,
             chunk_idx,
             direction,
-            label,
-        } => expand_row(file_path, *chunk_idx, *direction, label.clone(), ix, actions)
+            hidden_lines,
+        } => expand_row(file_path, *chunk_idx, *direction, *hidden_lines, ix, actions)
             .into_any_element(),
         DiffRow::Image {
             file_path: _,
@@ -604,31 +604,54 @@ fn line_number_label(cell: &RenderedCell) -> SharedString {
         .unwrap_or_default()
 }
 
+/// React's ExpandButton: gutter-width column with an icon, then a
+/// muted "N lines" label. We pick the icon by `hidden_lines` — small
+/// gaps get a single "unfold all" button, big gaps get a directional
+/// arrow.
 fn expand_row(
     file_path: &SharedString,
     chunk_idx: usize,
     direction: ExpandDirection,
-    label: SharedString,
+    hidden_lines: u32,
     ix: usize,
     actions: &DiffActions,
 ) -> impl IntoElement {
+    const DEFAULT_EXPAND_COUNT: u32 = 20;
     let actions = actions.clone();
     let path = file_path.to_string();
+    let dir_tag = match direction {
+        ExpandDirection::Above => "above",
+        ExpandDirection::Below => "below",
+    };
+    let show_unfold_all = hidden_lines <= DEFAULT_EXPAND_COUNT;
+    let icon_name = if show_unfold_all {
+        "unfold-vertical"
+    } else if direction == ExpandDirection::Above {
+        "arrow-up-from-line"
+    } else {
+        "arrow-down-from-line"
+    };
+    let icon_size = if show_unfold_all { 16.0 } else { 12.0 };
+    let label = SharedString::from(format!(
+        "{hidden_lines} {}",
+        if hidden_lines == 1 { "line" } else { "lines" }
+    ));
+
     div()
         .id(ElementId::Name(SharedString::from(format!(
-            "expand-{ix}-{}",
-            match direction {
-                ExpandDirection::Above => "above",
-                ExpandDirection::Below => "below",
-            }
+            "expand-{ix}-{dir_tag}"
         ))))
         .w_full()
-        .px_3()
-        .py_1()
-        .bg(Theme::DIFF_HUNK_BG)
-        .text_color(Theme::TEXT_LINK)
+        .h(px(24.0))
+        .flex()
+        .flex_row()
+        .items_stretch()
+        .bg(Theme::BG_HOVER)
+        .border_t_1()
+        .border_b_1()
+        .border_color(Theme::BORDER)
         .cursor_pointer()
-        .hover(|s| s.bg(Theme::BG_HOVER))
+        .hover(|s| s.bg(Theme::BG_SELECTED))
         .on_click(move |_e, window, cx| {
             actions(
                 DiffAction::ExpandContext {
@@ -640,7 +663,34 @@ fn expand_row(
                 cx,
             )
         })
-        .child(label)
+        .child(
+            // Left gutter: matches the line-number column width so the
+            // icon lines up with the diff numbers.
+            div()
+                .w(px(48.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_r_1()
+                .border_color(Theme::BORDER)
+                .child(crate::ui::widgets::icon(
+                    icon_name,
+                    icon_size,
+                    Theme::TEXT,
+                )),
+        )
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .px_3()
+                .text_color(Theme::TEXT_MUTED)
+                .text_size(px(12.0))
+                .font_family(MONO_FONT())
+                .child(label),
+        )
 }
 
 fn empty_placeholder(msg: &'static str) -> impl IntoElement {
