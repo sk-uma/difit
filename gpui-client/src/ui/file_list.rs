@@ -145,8 +145,47 @@ fn build_tree<'a>(files: &[(usize, &'a DiffFile)]) -> Vec<Node> {
         let parts: Vec<&str> = file.path.split('/').collect();
         insert_path(&mut roots, &parts, *idx, file, "");
     }
-    sort_nodes(&mut roots);
+    // Preserve the server's file order (don't sort) so the sidebar and
+    // the all-files-stacked main pane stay in lockstep. Then collapse
+    // chains of single-child directories the way React does.
+    collapse_chains(&mut roots);
     roots
+}
+
+fn collapse_chains(nodes: &mut Vec<Node>) {
+    for node in nodes.iter_mut() {
+        if let Node::Dir { children, .. } = node {
+            collapse_chains(children);
+        }
+    }
+    let mut i = 0;
+    while i < nodes.len() {
+        let (combined_name, child_path, grandchildren) = match &nodes[i] {
+            Node::Dir { name, children, .. } if children.len() == 1 => {
+                if let Some(Node::Dir {
+                    name: cn,
+                    path: cp,
+                    children: gc,
+                }) = children.first()
+                {
+                    (format!("{name}/{cn}"), cp.clone(), gc.clone())
+                } else {
+                    i += 1;
+                    continue;
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        nodes[i] = Node::Dir {
+            name: combined_name,
+            path: child_path,
+            children: grandchildren,
+        };
+        // Stay on the same index so we keep collapsing further chains.
+    }
 }
 
 fn insert_path(
@@ -194,20 +233,6 @@ fn insert_path(
     });
 }
 
-fn sort_nodes(nodes: &mut [Node]) {
-    nodes.sort_by(|a, b| {
-        let key = |n: &Node| match n {
-            Node::Dir { name, .. } => (0u8, name.clone()),
-            Node::File { name, .. } => (1u8, name.clone()),
-        };
-        key(a).cmp(&key(b))
-    });
-    for n in nodes {
-        if let Node::Dir { children, .. } = n {
-            sort_nodes(children);
-        }
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 fn render_nodes(
