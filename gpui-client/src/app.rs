@@ -1076,6 +1076,15 @@ impl DifitApp {
                     let _ = this.update(cx, |this, cx| {
                         this.blob_cache.insert(key.clone(), Arc::new(bytes));
                         this.pending_blob_fetches.remove(&key);
+                        // The expand renderer reads from blob_cache;
+                        // bump the cache version so ensure_rendered
+                        // rebuilds with the freshly-arrived bytes.
+                        // Otherwise the first Expand click looks
+                        // silent — the row is added but no context
+                        // lines appear until the *next* click triggers
+                        // a rebuild.
+                        this.expansion_version =
+                            this.expansion_version.wrapping_add(1);
                         cx.notify();
                     });
                 }
