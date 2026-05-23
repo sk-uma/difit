@@ -490,16 +490,26 @@ fn unified_row(
     ix: usize,
     actions: &DiffActions,
 ) -> impl IntoElement {
+    // items_start keeps the gutter / marker pinned to the first line
+    // when the code column wraps to multiple lines. min_w_0 +
+    // overflow_hidden on the row stops a long text column from
+    // expanding the row past its container — without this, GPUI's
+    // flex layout sizes the text column to its intrinsic (unwrapped)
+    // width and the line escapes the viewport.
     div()
         .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .flex()
         .flex_row()
+        .items_start()
         .bg(cell.bg)
         .child(add_button(file_path, ix, "u", cell.anchor, actions))
         .child(gutter(line_number_label(cell)))
         .child(
             div()
                 .w(px(18.0))
+                .flex_shrink_0()
                 .text_color(Theme::TEXT_MUTED)
                 .child(SharedString::from(cell.marker)),
         )
@@ -517,6 +527,7 @@ fn split_row(
         .w_full()
         .flex()
         .flex_row()
+        .items_stretch()
         .child(split_side(file_path, left, ix, "l", actions))
         .child(div().w(px(1.0)).h_full().bg(Theme::BORDER))
         .child(split_side(file_path, right, ix, "r", actions))
@@ -530,7 +541,7 @@ fn split_side(
     actions: &DiffActions,
 ) -> impl IntoElement {
     let bg = cell.map(|c| c.bg).unwrap_or(Theme::BG_HOVER);
-    let mut side = div().w_1_2().min_w_0().flex().flex_row().bg(bg);
+    let mut side = div().w_1_2().min_w_0().flex().flex_row().items_start().bg(bg);
 
     if let Some(cell) = cell {
         side = side
@@ -580,11 +591,23 @@ fn add_button(
 }
 
 fn cell_text(cell: &RenderedCell) -> impl IntoElement {
+    // Mirror React's `whitespace-pre-wrap break-all`: long code lines
+    // wrap inside the column instead of overflowing horizontally.
+    //
+    // The combination is important — `whitespace_normal` is what makes
+    // GPUI's text layer compute a wrap_width from the available flex
+    // space, and `overflow_hidden` on a flex child with min_w_0 stops
+    // the column from inflating to its intrinsic content size during
+    // the flex layout pass. Without the overflow_hidden the row grows
+    // wider than its parent and `wrap_width` ends up matching the
+    // unwrapped natural width, so no wrap happens.
     div()
         .flex_1()
+        .flex_basis(px(0.0))
         .min_w_0()
+        .overflow_hidden()
         .px_1()
-        .whitespace_nowrap()
+        .whitespace_normal()
         .child(styled_text(cell))
 }
 

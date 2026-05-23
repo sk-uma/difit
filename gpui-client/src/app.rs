@@ -1911,6 +1911,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let left_cluster = div()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .gap(px(12.0))
         .child(pill_toggle(
@@ -1964,6 +1965,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
     let right_cluster = div()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .gap(px(16.0))
         .child(right_cluster_threads)
@@ -1975,6 +1977,9 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
             });
         }));
 
+    // The two clusters lay out on a single row when the window is wide
+    // and wrap to a second row when it's narrow (React uses
+    // `flex-wrap`).
     let right_section = div()
         .flex_1()
         .min_w_0()
@@ -1982,6 +1987,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         .py(px(10.0))
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .justify_between()
         .gap(px(16.0))
