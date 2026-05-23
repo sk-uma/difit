@@ -1502,7 +1502,7 @@ impl Focusable for DifitApp {
 }
 
 impl Render for DifitApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let can_compose = self.current_file_path().is_some();
         let composing_active = self.composing.is_some();
         let show_help = self.show_help;
@@ -1554,12 +1554,14 @@ impl Render for DifitApp {
             (Some(b), Some(t)) => format!("Reviewing: {} ← {}", t, b),
             _ => String::new(),
         };
+        let is_maximized = window.is_maximized();
         let root = div()
             .size_full()
             .flex()
             .flex_col()
             .key_context("DifitApp")
             .track_focus(&self.focus_handle)
+            .child(crate::ui::titlebar::render_titlebar(is_maximized))
             .on_action(cx.listener(Self::on_next_row))
             .on_action(cx.listener(Self::on_prev_row))
             .on_action(cx.listener(Self::on_next_file))

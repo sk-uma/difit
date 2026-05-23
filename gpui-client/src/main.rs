@@ -71,6 +71,11 @@ fn main() -> Result<()> {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some("difit".into()),
+                // Hide the OS-drawn titlebar so the client can paint
+                // its own dark strip; Win32 still routes drag and
+                // window-control behavior through our registered
+                // hitboxes (see `ui/titlebar.rs`).
+                appears_transparent: true,
                 ..Default::default()
             }),
             ..Default::default()

@@ -59,8 +59,25 @@ const ICONS: &[(&str, &str)] = &[
     ("icons/arrow-up-from-line.svg", ARROW_UP_FROM_LINE),
     ("icons/arrow-down-from-line.svg", ARROW_DOWN_FROM_LINE),
     ("icons/unfold-vertical.svg", UNFOLD_VERTICAL),
+    ("icons/minus.svg", MINUS),
+    ("icons/square.svg", SQUARE),
+    ("icons/restore.svg", RESTORE),
     ("icons/difit-logo.svg", DIFIT_LOGO),
 ];
+
+const MINUS: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<path d="M5 12h14"/></svg>"#
+);
+const SQUARE: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<rect width="18" height="18" x="3" y="3" rx="2"/></svg>"#
+);
+/// "Restore" — two overlapping squares (Windows' un-maximize glyph).
+const RESTORE: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<rect width="14" height="14" x="3" y="7" rx="2"/><path d="M7 7V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2"/></svg>"#
+);
 
 const ARROW_UP_FROM_LINE: &str = concat!(
     r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,

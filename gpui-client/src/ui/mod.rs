@@ -15,4 +15,5 @@ pub mod revision_picker;
 pub mod settings_modal;
 pub mod text_input;
 pub mod theme;
+pub mod titlebar;
 pub mod widgets;
