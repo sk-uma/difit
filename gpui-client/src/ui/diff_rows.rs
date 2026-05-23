@@ -263,10 +263,10 @@ pub fn build_all_rows(
                 );
             }
 
-            rows.push(DiffRow::HunkHeader {
-                file_path: path_shared.clone(),
-                text: SharedString::from(chunk.header.clone()),
-            });
+            // The `@@ -10,5 +10,7 @@` header is intentionally not
+            // emitted — the React UI doesn't render it either; the
+            // Expand rows above/below carry the same "context here"
+            // affordance.
 
             match ctx.mode {
                 DiffViewMode::Unified => {
