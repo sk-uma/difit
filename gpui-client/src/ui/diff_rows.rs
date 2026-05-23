@@ -103,6 +103,11 @@ pub enum DiffRow {
         file_path: SharedString,
         bytes: Arc<Vec<u8>>,
     },
+    /// Empty marker row inserted directly under the anchor of an
+    /// in-progress comment. The renderer in `diff_view.rs` consults
+    /// `RenderedDiff::compose_renderer` to swap this row for the
+    /// actual compose form.
+    ComposeSlot,
     /// Tall block containing the markdown preview of one .md file.
     MarkdownPreview {
         file_path: SharedString,
@@ -123,6 +128,14 @@ pub struct BuildContext<'a> {
     pub blob_bytes: &'a HashMap<(String, String), Arc<Vec<u8>>>,
     pub old_ref: Option<String>,
     pub new_ref: Option<String>,
+    /// Where the in-progress compose form should be inlined, if any.
+    pub compose_anchor: Option<ComposeAnchor>,
+}
+
+#[derive(Clone)]
+pub struct ComposeAnchor {
+    pub file_path: String,
+    pub anchor: CommentAnchor,
 }
 
 /// Walks every file in the diff, producing a flat row list plus a map
@@ -310,6 +323,41 @@ pub fn build_all_rows(
                         hidden_lines: hidden_below,
                     });
                 }
+            }
+        }
+    }
+
+    // Post-pass: insert a ComposeSlot directly under the row that owns
+    // the in-progress compose anchor. Iterating in reverse keeps the
+    // already-recorded indices in `starts` valid (only later rows
+    // shift down).
+    if let Some(ca) = &ctx.compose_anchor {
+        for i in (0..rows.len()).rev() {
+            let matches = match &rows[i] {
+                DiffRow::Unified { file_path, cell } => {
+                    file_path.as_ref() == ca.file_path && cell.anchor == Some(ca.anchor)
+                }
+                DiffRow::Split {
+                    file_path,
+                    left,
+                    right,
+                } => {
+                    file_path.as_ref() == ca.file_path
+                        && (left.as_ref().and_then(|c| c.anchor) == Some(ca.anchor)
+                            || right.as_ref().and_then(|c| c.anchor) == Some(ca.anchor))
+                }
+                _ => false,
+            };
+            if matches {
+                rows.insert(i + 1, DiffRow::ComposeSlot);
+                // Bump file_starts entries that pointed past the
+                // insertion site so sidebar navigation stays correct.
+                for (_, start) in starts.iter_mut() {
+                    if *start > i {
+                        *start += 1;
+                    }
+                }
+                break;
             }
         }
     }

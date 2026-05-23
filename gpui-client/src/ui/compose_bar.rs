@@ -1,140 +1,137 @@
-//! The "new comment" panel that sits below the diff list while the user
-//! is composing a thread. Single-shot widget — the parent (DifitApp)
-//! owns the `TextInput` entities and the lifecycle of this bar.
+//! Comment compose bar.
+//!
+//! Visual layout mirrors React's `CommentForm`: a yellow-accented card
+//! with a title row, a textarea-styled body input, and right-aligned
+//! Cancel / Submit buttons (Submit uses the same yellow pill as the
+//! "Copy Prompt" button on the thread card).
 
-use gpui::{div, prelude::*, px, App, Entity, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{
+    div, prelude::*, px, App, ElementId, Entity, IntoElement, ParentElement, Rgba, SharedString,
+    Styled,
+};
 
 use crate::api::types::DiffSide;
 use crate::ui::text_input::TextInput;
 use crate::ui::theme::{Theme, UI_FONT};
 
-pub struct ComposeBarProps<S, B, T, C>
-where
-    S: Fn(&mut App) + 'static,
-    B: Fn(&mut App) + 'static,
-    T: Fn(DiffSide, &mut App) + 'static,
-    C: Fn(&mut App) + 'static,
-{
-    pub file_path: SharedString,
-    pub side: DiffSide,
-    pub line_input: Entity<TextInput>,
-    pub body_input: Entity<TextInput>,
-    pub on_toggle_side: T,
-    pub on_submit: S,
-    pub on_cancel: C,
-    pub _phantom: std::marker::PhantomData<B>,
-}
+// Yellow palette identical to the values in `comment_card.rs`.
+const YELLOW_400: Rgba = rgb(0xfacc15);
+const YELLOW_600_50: Rgba = rgba(0xca8a04, 0.5);
+const YELLOW_PATH_TEXT: Rgba = rgb(0xfde047);
+const YELLOW_BTN_BG: Rgba = rgba(0xeab308, 0.15);
+const YELLOW_BTN_TEXT: Rgba = rgb(0xfde047);
+const YELLOW_BTN_BORDER: Rgba = rgba(0xca8a04, 0.45);
 
 pub fn render_compose_bar(
     file_path: SharedString,
-    side: DiffSide,
-    line_input: Entity<TextInput>,
+    _side: DiffSide,
+    _line_input: Entity<TextInput>,
     body_input: Entity<TextInput>,
-    on_toggle_side: impl Fn(DiffSide, &mut App) + 'static,
+    _on_toggle_side: impl Fn(DiffSide, &mut App) + 'static,
     on_submit: impl Fn(&mut App) + 'static,
     on_cancel: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
     div()
         .w_full()
         .flex_shrink_0()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .bg(Theme::BG_ELEVATED)
-        .border_t_1()
-        .border_color(Theme::BORDER)
+        .my(px(8.0))
+        .mx(px(12.0))
+        .p(px(12.0))
+        .rounded_md()
+        .bg(Theme::BG_HOVER)
+        .border_1()
+        .border_color(YELLOW_600_50)
+        .border_l(px(4.0))
+        .border_color(YELLOW_400)
         .font_family(UI_FONT())
         .text_color(Theme::TEXT)
-        .text_size(px(12.0))
+        .text_size(px(13.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_3()
+                .justify_between()
                 .child(
                     div()
-                        .text_color(Theme::TEXT_MUTED)
-                        .child(SharedString::from(format!("New comment in {file_path}"))),
-                )
-                .child(side_toggle(side, on_toggle_side))
-                .child(
-                    div()
-                        .text_color(Theme::TEXT_MUTED)
-                        .child(SharedString::from("Line:")),
-                )
-                .child(div().w(px(80.0)).child(line_input.clone()))
-                .child(div().flex_1())
-                .child(button("compose-cancel", "Cancel", on_cancel))
-                .child(button("compose-submit", "Submit", on_submit)),
+                        .text_color(YELLOW_PATH_TEXT)
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(SharedString::from(format!("New comment — {file_path}"))),
+                ),
         )
-        .child(div().h(px(120.0)).child(body_input.clone()))
+        .child(
+            // Body: a textarea-styled box matching React's
+            // `bg-bg-secondary border border-border rounded px-3 py-2`.
+            div()
+                .min_h(px(80.0))
+                .bg(Theme::BG)
+                .border_1()
+                .border_color(Theme::BORDER)
+                .rounded(px(6.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .child(body_input.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap(px(8.0))
+                .child(cancel_button(on_cancel))
+                .child(submit_button(on_submit)),
+        )
 }
 
-fn side_toggle(
-    current: DiffSide,
-    on_toggle: impl Fn(DiffSide, &mut App) + 'static,
-) -> impl IntoElement {
-    let on_toggle = std::sync::Arc::new(on_toggle);
-    let on_old = on_toggle.clone();
-    let on_new = on_toggle;
+fn cancel_button(on_click: impl Fn(&mut App) + 'static) -> impl IntoElement {
     div()
-        .flex()
-        .flex_row()
-        .border_1()
-        .border_color(Theme::BORDER)
-        .rounded_sm()
-        .child(side_button(
-            "compose-side-old",
-            "Old",
-            current == DiffSide::Old,
-            move |cx| on_old(DiffSide::Old, cx),
-        ))
-        .child(side_button(
-            "compose-side-new",
-            "New",
-            current == DiffSide::New,
-            move |cx| on_new(DiffSide::New, cx),
-        ))
-}
-
-fn side_button(
-    id: &'static str,
-    label: &'static str,
-    active: bool,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    let bg = if active { Theme::BG_SELECTED } else { Theme::BG_ELEVATED };
-    let fg = if active { Theme::TEXT } else { Theme::TEXT_MUTED };
-    div()
-        .id(id)
-        .px_2()
-        .py_1()
-        .bg(bg)
-        .text_color(fg)
-        .cursor_pointer()
-        .hover(|s| s.bg(Theme::BG_HOVER))
-        .on_click(move |_e, _w, cx| on_click(cx))
-        .child(SharedString::from(label))
-}
-
-fn button(
-    id: &'static str,
-    label: &'static str,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded_sm()
-        .border_1()
-        .border_color(Theme::BORDER)
+        .id(ElementId::Name(SharedString::from("compose-cancel")))
+        .px(px(12.0))
+        .py(px(6.0))
+        .text_size(px(11.0))
+        .rounded(px(4.0))
+        .bg(Theme::BG_HOVER)
         .text_color(Theme::TEXT)
+        .border_1()
+        .border_color(Theme::BORDER)
         .cursor_pointer()
-        .hover(|s| s.bg(Theme::BG_HOVER))
+        .hover(|s| s.opacity(0.85))
         .on_click(move |_e, _w, cx| on_click(cx))
-        .child(SharedString::from(label))
+        .child(SharedString::from("Cancel"))
+}
+
+fn submit_button(on_click: impl Fn(&mut App) + 'static) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(SharedString::from("compose-submit")))
+        .px(px(12.0))
+        .py(px(6.0))
+        .text_size(px(11.0))
+        .rounded(px(4.0))
+        .bg(YELLOW_BTN_BG)
+        .text_color(YELLOW_BTN_TEXT)
+        .border_1()
+        .border_color(YELLOW_BTN_BORDER)
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.85))
+        .on_click(move |_e, _w, cx| on_click(cx))
+        .child(SharedString::from("Submit"))
+}
+
+const fn rgb(hex: u32) -> Rgba {
+    Rgba {
+        r: ((hex >> 16) & 0xff) as f32 / 255.0,
+        g: ((hex >> 8) & 0xff) as f32 / 255.0,
+        b: (hex & 0xff) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+const fn rgba(hex: u32, alpha: f32) -> Rgba {
+    let mut c = rgb(hex);
+    c.a = alpha;
+    c
 }

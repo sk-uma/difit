@@ -28,6 +28,7 @@ const YELLOW_PATH_TEXT: Rgba = rgb(0xfde047);
 const YELLOW_BTN_BG: Rgba = rgba(0xeab308, 0.15);
 const YELLOW_BTN_TEXT: Rgba = rgb(0xfde047);
 const YELLOW_BTN_BORDER: Rgba = rgba(0xca8a04, 0.45);
+const GREEN_700: Rgba = rgb(0x15803d);
 
 pub fn render_thread(thread: &DiffCommentThread, actions: &DiffActions) -> impl IntoElement {
     let anchor = CommentAnchor {
@@ -186,98 +187,140 @@ fn render_message(
     is_root: bool,
     actions: &DiffActions,
 ) -> impl IntoElement {
-    let author = msg
-        .author
-        .clone()
-        .unwrap_or_else(|| "anonymous".to_string());
-    let meta = format!("{} • {}", author, short_timestamp(&msg.created_at));
-
+    // Layout mirrors React's ThreadMessageItem:
+    //   `flex items-start gap-3` with
+    //     [ author badge? + body ]  on the left (flex-1)
+    //     [ Edit ] [ Check or Trash ]  on the right (shrink-0)
     let anchor = CommentAnchor {
         side: thread.position.side,
         line: thread_line(thread),
     };
     let edit_actions = actions.clone();
-    let delete_actions = actions.clone();
     let resolve_actions = actions.clone();
+    let delete_actions = actions.clone();
     let thread_id_e = thread.id.clone();
-    let thread_id_d = thread.id.clone();
     let thread_id_r = thread.id.clone();
+    let thread_id_d = thread.id.clone();
     let msg_id_e = msg.id.clone();
     let msg_id_d = msg.id.clone();
     let body_for_edit = msg.body.clone();
+    let author_label = msg.author.clone();
 
-    // Root messages get a "Resolve thread" action; replies get a
-    // plain "Delete".
-    let trailing_action = if is_root {
-        ("resolve", "Resolve")
-    } else {
-        ("delete", "Delete")
-    };
+    let mut left = div().flex_1().min_w_0().flex().flex_col().gap(px(8.0));
+    if let Some(author) = author_label {
+        left = left.child(author_badge(author));
+    }
+    left = left.child(
+        div()
+            .text_color(Theme::TEXT)
+            .child(render_comment_body(&msg.body)),
+    );
+
+    let right = div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .flex_shrink_0()
+        .gap(px(8.0))
+        .pt(px(2.0))
+        .child(square_icon_button(
+            format!("edit-{}-{}", thread.id, msg.id),
+            "edit",
+            "Edit message",
+            Theme::TEXT,
+            move |w, cx| {
+                edit_actions(
+                    DiffAction::StartEdit {
+                        thread_id: thread_id_e.clone(),
+                        message_id: msg_id_e.clone(),
+                        body: body_for_edit.clone(),
+                        anchor,
+                    },
+                    w,
+                    cx,
+                );
+            },
+        ))
+        .child(if is_root {
+            square_icon_button(
+                format!("resolve-{}-{}", thread.id, msg.id),
+                "check",
+                "Resolve thread",
+                GREEN_700,
+                move |w, cx| {
+                    resolve_actions(
+                        DiffAction::DeleteThread {
+                            thread_id: thread_id_r.clone(),
+                        },
+                        w,
+                        cx,
+                    );
+                },
+            )
+            .into_any_element()
+        } else {
+            square_icon_button(
+                format!("delete-{}-{}", thread.id, msg.id),
+                "trash",
+                "Delete reply",
+                Theme::FILE_STATUS_DEL,
+                move |w, cx| {
+                    delete_actions(
+                        DiffAction::DeleteMessage {
+                            thread_id: thread_id_d.clone(),
+                            message_id: msg_id_d.clone(),
+                        },
+                        w,
+                        cx,
+                    );
+                },
+            )
+            .into_any_element()
+        });
 
     div()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(Theme::TEXT_MUTED)
-                        .text_size(px(11.0))
-                        .child(SharedString::from(meta)),
-                )
-                .child(action_link(
-                    format!("edit-{}-{}", thread.id, msg.id),
-                    "Edit",
-                    move |w, cx| {
-                        edit_actions(
-                            DiffAction::StartEdit {
-                                thread_id: thread_id_e.clone(),
-                                message_id: msg_id_e.clone(),
-                                body: body_for_edit.clone(),
-                                anchor,
-                            },
-                            w,
-                            cx,
-                        );
-                    },
-                ))
-                .child(action_link(
-                    format!(
-                        "{}-{}-{}",
-                        trailing_action.0, thread.id, msg.id
-                    ),
-                    trailing_action.1,
-                    move |w, cx| {
-                        if is_root {
-                            resolve_actions(
-                                DiffAction::DeleteThread {
-                                    thread_id: thread_id_r.clone(),
-                                },
-                                w,
-                                cx,
-                            );
-                        } else {
-                            delete_actions(
-                                DiffAction::DeleteMessage {
-                                    thread_id: thread_id_d.clone(),
-                                    message_id: msg_id_d.clone(),
-                                },
-                                w,
-                                cx,
-                            );
-                        }
-                    },
-                )),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_color(Theme::TEXT)
-                .child(render_comment_body(&msg.body)),
-        )
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(12.0))
+        .child(left)
+        .child(right)
+}
+
+fn author_badge(author: String) -> impl IntoElement {
+    div()
+        .self_start()
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded_full()
+        .border_1()
+        .border_color(Theme::BORDER)
+        .bg(Theme::BG)
+        .text_color(Theme::TEXT)
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(SharedString::from(author))
+}
+
+fn square_icon_button(
+    id: String,
+    icon_name: &'static str,
+    tooltip: &'static str,
+    color: Rgba,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .p(px(6.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(Theme::BORDER)
+        .bg(Theme::BG_HOVER)
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG))
+        .on_click(move |_e, w, cx| on_click(w, cx))
+        .tooltip(crate::ui::widgets::label_tooltip(tooltip))
+        .child(icon(icon_name, 12.0, color))
 }
 
 fn render_comment_body(text: &str) -> StyledText {
@@ -286,33 +329,6 @@ fn render_comment_body(text: &str) -> StyledText {
         StyledText::new(SharedString::from(rendered))
     } else {
         StyledText::new(SharedString::from(rendered)).with_highlights(highlights)
-    }
-}
-
-fn action_link(
-    id: String,
-    label: &'static str,
-    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(ElementId::Name(SharedString::from(id)))
-        .px_1()
-        .text_color(Theme::TEXT_MUTED)
-        .text_size(px(11.0))
-        .cursor_pointer()
-        .hover(|s| s.text_color(Theme::TEXT))
-        .on_click(move |_e, w, cx| on_click(w, cx))
-        .child(SharedString::from(label))
-}
-
-fn short_timestamp(iso: &str) -> String {
-    if let Some(t_idx) = iso.find('T') {
-        let date = &iso[..t_idx];
-        let tail = &iso[t_idx + 1..];
-        let time = tail.get(..5).unwrap_or(tail);
-        format!("{date} {time}")
-    } else {
-        iso.to_string()
     }
 }
 

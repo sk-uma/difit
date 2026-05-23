@@ -450,12 +450,15 @@ impl DifitApp {
             body_input,
             mode,
         });
+        // The inline ComposeSlot row needs the cache rebuild to appear.
+        self.bump_ui();
         window.focus(&body_handle, cx);
         cx.notify();
     }
 
     fn cancel_compose(&mut self, cx: &mut Context<Self>) {
         self.composing = None;
+        self.bump_ui();
         cx.notify();
     }
 
@@ -554,7 +557,9 @@ impl DifitApp {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(())) => {
-                        this.composing = None;
+                        if this.composing.take().is_some() {
+                            this.bump_ui();
+                        }
                     }
                     Ok(Err(e)) => {
                         log::error!("compose post failed: {e:#}");
@@ -967,7 +972,9 @@ impl DifitApp {
         if self.selected != Some(next) {
             self.selected = Some(next);
             self.selected_row = None;
-            self.composing = None;
+            if self.composing.take().is_some() {
+                self.bump_ui();
+            }
             cx.notify();
         }
     }
@@ -989,11 +996,13 @@ impl DifitApp {
         };
         if self.selected != Some(idx) {
             self.selected = Some(idx);
-            self.composing = None;
+            if self.composing.take().is_some() {
+                self.bump_ui();
+            }
         }
         self.show_comments_list = false;
 
-        if let Some(rendered) = self.ensure_rendered() {
+        if let Some(rendered) = self.ensure_rendered(cx) {
             for (i, row) in rendered.rows.iter().enumerate() {
                 let matches = match row {
                     DiffRow::Unified { cell, .. } => cell
@@ -1345,7 +1354,7 @@ impl DifitApp {
     /// Return the RenderedDiff for the whole repo, building (or refreshing)
     /// the cache if needed. This is the hot path's only heavy step, and
     /// only runs when the cache key changes.
-    fn ensure_rendered(&mut self) -> Option<RenderedDiff> {
+    fn ensure_rendered(&mut self, cx: &mut Context<Self>) -> Option<RenderedDiff> {
         let diff = self.diff.clone()?;
         let key = RenderedCacheKey {
             view_mode: self.view_mode,
@@ -1372,6 +1381,21 @@ impl DifitApp {
                 .map(|c| c.list_state.logical_scroll_top());
 
             let viewed = self.viewed_paths_for_current_repo();
+            let compose_anchor =
+                self.composing
+                    .as_ref()
+                    .map(|c| crate::ui::diff_rows::ComposeAnchor {
+                        file_path: c.file_path.clone(),
+                        anchor: CommentAnchor {
+                            side: c.side,
+                            line: c
+                                .line_input
+                                .read(cx)
+                                .content()
+                                .parse::<u32>()
+                                .unwrap_or(0),
+                        },
+                    });
             let ctx = BuildContext {
                 mode: self.view_mode,
                 comments: self.comments.as_ref(),
@@ -1385,6 +1409,7 @@ impl DifitApp {
                     .clone()
                     .filter(|s| !s.is_empty()),
                 new_ref: Some(self.expansion_ref()),
+                compose_anchor,
             };
             let (rows, file_starts) = build_all_rows(&diff, &ctx);
             let item_count = rows.len();
@@ -1504,7 +1529,7 @@ impl Render for DifitApp {
         let ignore_whitespace = self.ignore_whitespace;
         let use_merge_base = self.use_merge_base;
 
-        let rendered = self.ensure_rendered();
+        let rendered = self.ensure_rendered(cx);
         let diff = self.diff.clone();
         let selected = self.selected;
         let comments = self.comments.clone();
@@ -1671,18 +1696,61 @@ impl Render for DifitApp {
         };
 
         let root = if show_revision_modal {
-            let entity_for_close = entity.clone();
-            let diff_for_modal = self.diff.clone();
             let revs_for_modal = self.revisions.clone();
-            let ignore_ws = self.ignore_whitespace;
-            let merge_base = self.use_merge_base;
+            let base_now = self.selected_base.clone();
+            let target_now = self.selected_target.clone();
+            let base_open_now = self.base_picker_open;
+            let target_open_now = self.target_picker_open;
+
+            let mk = |f: fn(&mut DifitApp, &mut Context<DifitApp>)| {
+                let entity = entity.clone();
+                move |cx: &mut App| {
+                    entity.update(cx, |this, cx| f(this, cx));
+                }
+            };
+            let mk_pick =
+                |role: RevisionRole| {
+                    let entity = entity.clone();
+                    move |value: String, cx: &mut App| {
+                        entity.update(cx, |this, cx| this.pick_revision(role, value, cx));
+                    }
+                };
+            let entity_close = entity.clone();
+            let entity_apply = entity.clone();
             root.child(render_revision_modal(
-                diff_for_modal.as_deref(),
                 revs_for_modal.as_ref(),
-                ignore_ws,
-                merge_base,
+                base_now.as_deref(),
+                target_now.as_deref(),
+                base_open_now,
+                target_open_now,
+                mk(|this, cx| {
+                    this.base_picker_open = !this.base_picker_open;
+                    this.target_picker_open = false;
+                    cx.notify();
+                }),
+                mk_pick(RevisionRole::Base),
+                mk(|this, cx| {
+                    this.base_picker_open = false;
+                    cx.notify();
+                }),
+                mk(|this, cx| {
+                    this.target_picker_open = !this.target_picker_open;
+                    this.base_picker_open = false;
+                    cx.notify();
+                }),
+                mk_pick(RevisionRole::Target),
+                mk(|this, cx| {
+                    this.target_picker_open = false;
+                    cx.notify();
+                }),
                 move |cx| {
-                    entity_for_close.update(cx, |this, cx| {
+                    entity_apply.update(cx, |this, cx| {
+                        this.show_revision_modal = false;
+                        this.refresh_diff(cx);
+                    });
+                },
+                move |cx| {
+                    entity_close.update(cx, |this, cx| {
                         this.show_revision_modal = false;
                         cx.notify();
                     });
@@ -1751,8 +1819,9 @@ impl Render for DifitApp {
 }
 
 impl DifitApp {
-    /// Wraps the all-files virtualized list with the optional compose
-    /// bar at the bottom.
+    /// Wraps the all-files virtualized list. The compose form is now
+    /// inlined as a `ComposeSlot` row underneath the diff line being
+    /// commented on, matching React's CommentForm placement.
     fn render_main_column(
         &self,
         rendered: Option<RenderedDiff>,
@@ -1760,36 +1829,60 @@ impl DifitApp {
         actions: DiffActions,
         entity: &Entity<DifitApp>,
     ) -> impl IntoElement {
-        let mut col = div()
+        let compose_renderer: Option<crate::ui::diff_view::ComposeRenderer> =
+            self.composing.as_ref().map(|state| {
+                let file_path = SharedString::from(state.file_path.clone());
+                let side = state.side;
+                let line_input = state.line_input.clone();
+                let body_input = state.body_input.clone();
+                let entity_s = entity.clone();
+                let entity_c = entity.clone();
+                let entity_t = entity.clone();
+                std::sync::Arc::new(move || {
+                    let toggle = {
+                        let entity_t = entity_t.clone();
+                        move |side: DiffSide, cx: &mut App| {
+                            entity_t
+                                .update(cx, |this, cx| this.toggle_compose_side(side, cx));
+                        }
+                    };
+                    let submit = {
+                        let entity_s = entity_s.clone();
+                        move |cx: &mut App| {
+                            entity_s.update(cx, |this, cx| this.submit_compose(cx));
+                        }
+                    };
+                    let cancel = {
+                        let entity_c = entity_c.clone();
+                        move |cx: &mut App| {
+                            entity_c.update(cx, |this, cx| this.cancel_compose(cx));
+                        }
+                    };
+                    render_compose_bar(
+                        file_path.clone(),
+                        side,
+                        line_input.clone(),
+                        body_input.clone(),
+                        toggle,
+                        submit,
+                        cancel,
+                    )
+                    .into_any_element()
+                }) as crate::ui::diff_view::ComposeRenderer
+            });
+
+        div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .flex()
             .flex_col()
-            .child(render_main_pane(rendered, font_size, actions));
-
-        if let Some(state) = self.composing.as_ref() {
-            let entity_s = entity.clone();
-            let entity_c = entity.clone();
-            let entity_t = entity.clone();
-            col = col.child(render_compose_bar(
-                SharedString::from(state.file_path.clone()),
-                state.side,
-                state.line_input.clone(),
-                state.body_input.clone(),
-                move |side, cx| {
-                    entity_t.update(cx, |this, cx| this.toggle_compose_side(side, cx));
-                },
-                move |cx| {
-                    entity_s.update(cx, |this, cx| this.submit_compose(cx));
-                },
-                move |cx| {
-                    entity_c.update(cx, |this, cx| this.cancel_compose(cx));
-                },
-            ));
-        }
-
-        col
+            .child(render_main_pane(
+                rendered,
+                font_size,
+                actions,
+                compose_renderer,
+            ))
     }
 }
 

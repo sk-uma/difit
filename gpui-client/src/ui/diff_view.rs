@@ -36,6 +36,8 @@ impl DiffViewMode {
     }
 }
 
+pub type ComposeRenderer = Arc<dyn Fn() -> AnyElement + 'static>;
+
 #[derive(Clone)]
 pub struct RenderedDiff {
     pub rows: Arc<Vec<DiffRow>>,
@@ -46,6 +48,7 @@ pub fn render_main_pane(
     rendered: Option<RenderedDiff>,
     font_size: f32,
     actions: DiffActions,
+    compose_renderer: Option<ComposeRenderer>,
 ) -> impl IntoElement {
     // Generous line-height (~1.55× the font size) matches Zed's buffer
     // breathing room — diff lines are dense and otherwise feel cramped.
@@ -70,18 +73,26 @@ pub fn render_main_pane(
         return container.child(empty_placeholder("No files in this diff."));
     }
 
-    container.child(virtualized_body(rendered, font_size, actions))
+    container.child(virtualized_body(rendered, font_size, actions, compose_renderer))
 }
 
 fn virtualized_body(
     rendered: RenderedDiff,
     font_size: f32,
     actions: DiffActions,
+    compose_renderer: Option<ComposeRenderer>,
 ) -> impl IntoElement {
     let rows = rendered.rows.clone();
     let state_for_bar = rendered.list_state.clone();
     let actions_for_bar = actions.clone();
+    let compose = compose_renderer;
     let list_el = list(rendered.list_state, move |ix, _window, _cx| {
+        if matches!(rows[ix], DiffRow::ComposeSlot) {
+            return compose
+                .as_ref()
+                .map(|f| f())
+                .unwrap_or_else(|| div().into_any_element());
+        }
         render_row(&rows[ix], ix, font_size, &actions).into_any_element()
     })
     .flex_1()
@@ -201,6 +212,7 @@ fn list_scrollbar(state: ListState, total_items: usize, actions: DiffActions) ->
 
 fn render_row(row: &DiffRow, ix: usize, font_size: f32, actions: &DiffActions) -> AnyElement {
     match row {
+        DiffRow::ComposeSlot => div().into_any_element(),
         DiffRow::Spacer => div().h(px(8.0)).into_any_element(),
         DiffRow::FileHeader(data) => render_file_header(data, actions).into_any_element(),
         DiffRow::HunkHeader { text, .. } => hunk_header(text.clone()).into_any_element(),
