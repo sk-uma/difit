@@ -1449,24 +1449,6 @@ fn format_thread_prompt(thread: &DiffCommentThread) -> String {
     format!("{header}\n{bodies}")
 }
 
-fn render_footer() -> impl IntoElement {
-    div()
-        .w_full()
-        .h(px(28.0))
-        .px_4()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .bg(Theme::BG_ELEVATED)
-        .border_t_1()
-        .border_color(Theme::BORDER)
-        .text_color(Theme::TEXT_MUTED)
-        .text_size(px(11.0))
-        .child(SharedString::from(
-            "⭐ Star on GitHub: github.com/yoshiko-pg/difit",
-        ))
-}
 
 fn next_thread_id() -> String {
     let nanos = std::time::SystemTime::now()
@@ -1662,11 +1644,19 @@ impl Render for DifitApp {
                                 });
                             }
                         },
+                        {
+                            let entity = entity.clone();
+                            move |cx: &mut App| {
+                                entity.update(cx, |this, cx| {
+                                    this.show_help = !this.show_help;
+                                    cx.notify();
+                                });
+                            }
+                        },
                     ));
                 }
                 row.child(self.render_main_column(rendered, font_size, actions, &entity))
-            })
-            .child(render_footer());
+            });
 
         let root = if show_help {
             let entity_for_close = entity.clone();

@@ -29,6 +29,7 @@ pub fn render_file_list(
     on_toggle_viewed: impl Fn(usize, &mut App) + 'static + Clone,
     on_toggle_collapsed: impl Fn(usize, &mut App) + 'static + Clone,
     on_toggle_dir: impl Fn(String, &mut App) + 'static + Clone,
+    on_open_shortcuts: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
     let total = files.len();
     let filter_lc = filter_text.to_ascii_lowercase();
@@ -78,6 +79,55 @@ pub fn render_file_list(
                 .min_h_0()
                 .overflow_y_scroll()
                 .children(rows),
+        )
+        .child(sidebar_footer(on_open_shortcuts))
+}
+
+/// React's bottom-of-sidebar bar: "[Keyboard] Shortcuts" on the left,
+/// "Star on GitHub [octocat]" on the right.
+fn sidebar_footer(on_open_shortcuts: impl Fn(&mut App) + 'static) -> impl IntoElement {
+    use crate::ui::widgets::icon;
+    div()
+        .w_full()
+        .px(px(16.0))
+        .py(px(14.0))
+        .border_t_1()
+        .border_color(Theme::BORDER)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .id("sidebar-shortcuts")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(13.0))
+                .text_color(Theme::TEXT_MUTED)
+                .cursor_pointer()
+                .hover(|s| s.text_color(Theme::TEXT))
+                .on_click(move |_e, _w, cx| on_open_shortcuts(cx))
+                .child(icon("keyboard", 16.0, Theme::TEXT_MUTED))
+                .child(SharedString::from("Shortcuts")),
+        )
+        .child(
+            div()
+                .id("sidebar-github")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(px(13.0))
+                .text_color(Theme::TEXT_MUTED)
+                .cursor_pointer()
+                .hover(|s| s.text_color(Theme::TEXT))
+                .on_click(|_e, _w, cx| {
+                    cx.open_url("https://github.com/yoshiko-pg/difit");
+                })
+                .child(SharedString::from("Star on GitHub"))
+                .child(icon("github", 18.0, Theme::TEXT_MUTED)),
         )
 }
 
