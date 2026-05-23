@@ -36,7 +36,12 @@ pub struct CommentAnchor {
 #[derive(Clone)]
 pub struct RenderedCell {
     pub bg: Rgba,
-    pub line_number: Option<u32>,
+    /// Old (pre-change) line number. Shown in the left gutter column
+    /// for Unified mode; the split renderer ignores it.
+    pub old_line_number: Option<u32>,
+    /// New (post-change) line number. Shown in the right gutter column
+    /// for Unified mode; the split renderer uses the appropriate side.
+    pub new_line_number: Option<u32>,
     pub anchor: Option<CommentAnchor>,
     pub marker: &'static str,
     pub text: SharedString,
@@ -476,9 +481,19 @@ fn render_unified_cell(line: &DiffLine, extension: &str) -> RenderedCell {
     };
     let (text, highlights) = bake_text(&line.content, extension, do_highlight);
     let anchor = unified_anchor(line);
+    // Both gutter columns get values for context lines; deletes only
+    // populate `old`, adds only `new` — matching DiffLineRow's two
+    // <td> columns.
+    let (old_ln, new_ln) = match line.kind {
+        LineType::Add => (None, line.new_line_number),
+        LineType::Delete | LineType::Remove => (line.old_line_number, None),
+        LineType::Normal | LineType::Context => (line.old_line_number, line.new_line_number),
+        LineType::Hunk | LineType::Header => (None, None),
+    };
     RenderedCell {
         bg,
-        line_number: line.new_line_number.or(line.old_line_number),
+        old_line_number: old_ln,
+        new_line_number: new_ln,
         anchor,
         marker,
         text,
@@ -510,9 +525,17 @@ fn render_split_cell(line: &DiffLine, extension: &str, bg: Rgba, side: DiffSide)
         DiffSide::New => line.new_line_number,
     };
     let anchor = line_no.map(|n| CommentAnchor { side, line: n });
+    // Split mode shows one gutter per side; populate that side's slot
+    // and leave the other None so the row renderer just emits the
+    // single column.
+    let (old_ln, new_ln) = match side {
+        DiffSide::Old => (line_no, None),
+        DiffSide::New => (None, line_no),
+    };
     RenderedCell {
         bg,
-        line_number: line_no,
+        old_line_number: old_ln,
+        new_line_number: new_ln,
         anchor,
         marker: "",
         text,
@@ -639,10 +662,10 @@ fn make_context_cell(
         side: DiffSide::New,
         line: n,
     });
-    let _ = old_line_no;
     RenderedCell {
         bg: Theme::BG_ELEVATED,
-        line_number: new_line_no,
+        old_line_number: old_line_no,
+        new_line_number: new_line_no,
         anchor,
         marker: " ",
         text,

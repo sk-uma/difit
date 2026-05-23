@@ -496,6 +496,16 @@ fn unified_row(
     // expanding the row past its container — without this, GPUI's
     // flex layout sizes the text column to its intrinsic (unwrapped)
     // width and the line escapes the viewport.
+    // Layout exactly matches React's DiffLineRow + DiffCodeLine:
+    //   [old# gutter][new# gutter][+/-/space prefix][code body]
+    // The two gutters share the bg-secondary background and a right
+    // border. The prefix column has its own line-coloured background.
+    // The "+" affordance for adding a comment lives inside the new#
+    // gutter as a click handler (React reveals it on hover; we keep
+    // the gutter itself clickable for simplicity).
+    let new_gutter_action = actions.clone();
+    let new_gutter_path = file_path.to_string();
+    let new_gutter_anchor = cell.anchor;
     div()
         .w_full()
         .min_w_0()
@@ -504,15 +514,32 @@ fn unified_row(
         .flex_row()
         .items_start()
         .bg(cell.bg)
-        .child(add_button(file_path, ix, "u", cell.anchor, actions))
-        .child(gutter(line_number_label(cell)))
-        .child(
-            div()
-                .w(px(18.0))
-                .flex_shrink_0()
-                .text_color(Theme::TEXT_MUTED)
-                .child(SharedString::from(cell.marker)),
-        )
+        .child(gutter_cell(
+            optional_line_label(cell.old_line_number),
+            None,
+            None,
+        ))
+        .child(gutter_cell(
+            optional_line_label(cell.new_line_number),
+            Some(ElementId::Name(SharedString::from(format!(
+                "ln-add-u-{ix}"
+            )))),
+            new_gutter_anchor.map(move |anchor| {
+                let actions = new_gutter_action.clone();
+                let path = new_gutter_path.clone();
+                std::sync::Arc::new(move |w: &mut gpui::Window, cx: &mut gpui::App| {
+                    actions(
+                        DiffAction::StartComposeAt {
+                            file_path: path.clone(),
+                            anchor,
+                        },
+                        w,
+                        cx,
+                    );
+                }) as std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App)>
+            }),
+        ))
+        .child(marker_cell(cell.marker, cell.bg))
         .child(cell_text(cell))
 }
 
@@ -544,9 +571,35 @@ fn split_side(
     let mut side = div().w_1_2().min_w_0().flex().flex_row().items_start().bg(bg);
 
     if let Some(cell) = cell {
+        // Split shows one gutter per side; pick whichever line number
+        // is populated (set by render_split_cell based on DiffSide).
+        let label = optional_line_label(
+            cell.old_line_number.or(cell.new_line_number),
+        );
+        let anchor = cell.anchor;
+        let click = anchor.map(|a| {
+            let actions = actions.clone();
+            let path = file_path.to_string();
+            std::sync::Arc::new(move |w: &mut gpui::Window, cx: &mut gpui::App| {
+                actions(
+                    DiffAction::StartComposeAt {
+                        file_path: path.clone(),
+                        anchor: a,
+                    },
+                    w,
+                    cx,
+                );
+            }) as std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App)>
+        });
         side = side
-            .child(add_button(file_path, ix, side_tag, cell.anchor, actions))
-            .child(gutter(line_number_label(cell)))
+            .child(gutter_cell(
+                label,
+                Some(ElementId::Name(SharedString::from(format!(
+                    "ln-add-{side_tag}-{ix}"
+                )))),
+                click,
+            ))
+            .child(marker_cell(cell.marker, cell.bg))
             .child(cell_text(cell));
     }
 
@@ -591,22 +644,13 @@ fn add_button(
 }
 
 fn cell_text(cell: &RenderedCell) -> impl IntoElement {
-    // Mirror React's `whitespace-pre-wrap break-all`: long code lines
-    // wrap inside the column instead of overflowing horizontally.
-    //
-    // The combination is important — `whitespace_normal` is what makes
-    // GPUI's text layer compute a wrap_width from the available flex
-    // space, and `overflow_hidden` on a flex child with min_w_0 stops
-    // the column from inflating to its intrinsic content size during
-    // the flex layout pass. Without the overflow_hidden the row grows
-    // wider than its parent and `wrap_width` ends up matching the
-    // unwrapped natural width, so no wrap happens.
+    // px_3 matches React's `px-3` (12px each side) on the code column.
     div()
         .flex_1()
         .flex_basis(px(0.0))
         .min_w_0()
         .overflow_hidden()
-        .px_1()
+        .px_3()
         .whitespace_normal()
         .child(styled_text(cell))
 }
@@ -619,23 +663,70 @@ fn styled_text(cell: &RenderedCell) -> StyledText {
     }
 }
 
-/// Line-number gutter. 64px is wide enough for 5-digit numbers at the
-/// default mono font size; tight wrapping was making "1234" stack as
-/// "123\n4" in tall files.
-fn gutter(label: SharedString) -> impl IntoElement {
-    div()
-        .w(px(64.0))
+/// Single line-number column matching React's
+/// `bg-github-bg-secondary border-r border-github-border px-2 text-right
+/// text-github-text-muted` td. When `click` is Some, the cell becomes a
+/// "+" affordance for starting a comment on that line.
+fn gutter_cell(
+    label: SharedString,
+    id: Option<ElementId>,
+    click: Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App)>>,
+) -> AnyElement {
+    let base = div()
+        .w(px(56.0))
         .flex_shrink_0()
         .px_2()
+        .py(px(0.0))
+        .bg(Theme::BG_ELEVATED)
+        .border_r_1()
+        .border_color(Theme::BORDER)
         .text_align(gpui::TextAlign::Right)
         .whitespace_nowrap()
         .overflow_hidden()
-        .text_color(Theme::TEXT_MUTED)
-        .child(label)
+        .text_color(Theme::TEXT_MUTED);
+    match (id, click) {
+        (Some(id), Some(cb)) => base
+            .id(id)
+            .cursor_pointer()
+            .hover(|s| s.bg(Theme::BG_HOVER).text_color(Theme::TEXT_LINK))
+            .on_click(move |_e, w, cx| cb(w, cx))
+            .child(label)
+            .into_any_element(),
+        _ => base.child(label).into_any_element(),
+    }
 }
 
+/// "+/-/space" prefix column. 20px wide, center-aligned, with the
+/// line's background colour and a right border that separates it from
+/// the code text — matches React's DiffCodeLine span.
+fn marker_cell(marker: &'static str, bg: gpui::Rgba) -> impl IntoElement {
+    let fg = match marker {
+        "+" => Theme::FILE_STATUS_ADD,
+        "-" => Theme::FILE_STATUS_DEL,
+        _ => Theme::TEXT_MUTED,
+    };
+    div()
+        .w(px(20.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .border_r_1()
+        .border_color(Theme::BORDER)
+        .text_color(fg)
+        .child(SharedString::from(marker))
+}
+
+fn optional_line_label(n: Option<u32>) -> SharedString {
+    n.map(|v| SharedString::from(v.to_string()))
+        .unwrap_or_default()
+}
+
+#[allow(dead_code)]
 fn line_number_label(cell: &RenderedCell) -> SharedString {
-    cell.line_number
+    cell.new_line_number
+        .or(cell.old_line_number)
         .map(|n| SharedString::from(n.to_string()))
         .unwrap_or_default()
 }
