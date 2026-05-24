@@ -309,6 +309,11 @@ pub fn build_all_rows(
             }
 
             if ctx.mode == DiffViewMode::Unified && !suppress_expand {
+                let next_start = if chunk_idx + 1 < chunk_count {
+                    Some(file.chunks[chunk_idx + 1].new_start as usize)
+                } else {
+                    None
+                };
                 push_expanded_below(
                     &mut rows,
                     &path_shared,
@@ -316,6 +321,7 @@ pub fn build_all_rows(
                     below_count,
                     new_blob_lines.as_deref(),
                     &extension,
+                    next_start,
                 );
                 // Walk the chunk's lines to find the actual last new-
                 // side line number. `chunk.new_lines` is the header
@@ -749,6 +755,10 @@ fn push_expanded_above(
     }
 }
 
+// `next_chunk_start` is an exclusive upper bound on the new-side line
+// number we may push. Set to `next_chunk.new_start` for middle chunks
+// (so we don't duplicate the next chunk's first line) and `None` for
+// the last chunk (cap defaults to the blob length).
 fn push_expanded_below(
     rows: &mut Vec<DiffRow>,
     file_path: &SharedString,
@@ -756,6 +766,7 @@ fn push_expanded_below(
     below_count: u32,
     blob_lines: Option<&[String]>,
     extension: &str,
+    next_chunk_start: Option<usize>,
 ) {
     if below_count == 0 {
         return;
@@ -772,7 +783,8 @@ fn push_expanded_below(
         .map(|n| n as usize)
         .unwrap_or((chunk.new_start as usize) + (chunk.new_lines as usize) - 1);
     let start = chunk_last_new + 1;
-    let end = (start + below_count as usize).min(blob.len() + 1);
+    let cap = next_chunk_start.unwrap_or(blob.len() + 1);
+    let end = (start + below_count as usize).min(blob.len() + 1).min(cap);
     let old_offset = chunk.old_start as i64 - chunk.new_start as i64;
     for new_line_no in start..end {
         let blob_idx = new_line_no - 1;
