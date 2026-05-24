@@ -240,28 +240,41 @@ pub fn build_all_rows(
             ctx.blob_bytes
                 .get(&(file.path.clone(), r.clone()))
                 .map(|bytes| {
+                    // `split_terminator` so a trailing newline doesn't
+                    // produce a phantom empty "last line" — the Below
+                    // Expand for the final chunk was pushing that
+                    // empty row past the actual end of the file.
                     String::from_utf8_lossy(bytes)
-                        .split('\n')
+                        .split_terminator('\n')
                         .map(String::from)
                         .collect::<Vec<_>>()
                 })
         });
 
+        // Fully added or deleted files have no hidden context — the
+        // diff already shows every line that exists. React's
+        // `getHiddenLinesAfter` returns 0 immediately for these, so
+        // skip emitting Expand rows altogether.
+        let suppress_expand = matches!(file.status, FileStatus::Added | FileStatus::Deleted);
+
         let chunk_count = file.chunks.len();
+        let blob_len_hint = new_blob_lines.as_ref().map(|b| b.len() as u32);
         for (chunk_idx, chunk) in file.chunks.iter().enumerate() {
             let (above_count, below_count) = expansions.get(&chunk_idx).copied().unwrap_or((0, 0));
 
-            if ctx.mode == DiffViewMode::Unified {
-                // Hidden lines above this chunk = gap between prev chunk
-                // end and this chunk start, minus what's already been
-                // expanded into.
-                let prev_end_new = if chunk_idx == 0 {
-                    0
-                } else {
-                    let prev = &file.chunks[chunk_idx - 1];
-                    prev.new_start + prev.new_lines - 1
-                };
-                let gap_above = chunk.new_start.saturating_sub(prev_end_new + 1);
+            // Above Expand is only emitted for the FIRST chunk in the
+            // file (it covers the gap from line 1). Gaps between
+            // consecutive chunks are owned by the previous chunk's
+            // Below Expand, so we don't double up with a redundant
+            // Above button.
+            if ctx.mode == DiffViewMode::Unified && chunk_idx == 0 && !suppress_expand {
+                let chunk_start_new = chunk
+                    .lines
+                    .iter()
+                    .filter_map(|l| l.new_line_number)
+                    .min()
+                    .unwrap_or(chunk.new_start);
+                let gap_above = chunk_start_new.saturating_sub(1);
                 let hidden_above = gap_above.saturating_sub(above_count);
                 if hidden_above > 0 {
                     rows.push(DiffRow::Expand {
@@ -295,7 +308,7 @@ pub fn build_all_rows(
                 }
             }
 
-            if ctx.mode == DiffViewMode::Unified {
+            if ctx.mode == DiffViewMode::Unified && !suppress_expand {
                 push_expanded_below(
                     &mut rows,
                     &path_shared,
@@ -304,15 +317,34 @@ pub fn build_all_rows(
                     new_blob_lines.as_deref(),
                     &extension,
                 );
-                let chunk_end_new = chunk.new_start + chunk.new_lines - 1;
+                // Walk the chunk's lines to find the actual last new-
+                // side line number. `chunk.new_lines` is the header
+                // count which doesn't always agree with the trailing
+                // context the server attached — using the real
+                // max-new-line-no keeps the "remaining lines" Expand
+                // label honest.
+                let chunk_end_new = chunk
+                    .lines
+                    .iter()
+                    .filter_map(|l| l.new_line_number)
+                    .max()
+                    .unwrap_or(chunk.new_start + chunk.new_lines - 1);
                 // Hidden lines below = gap to next chunk; for the last
-                // chunk we don't know the file length so just allow
-                // expansion via a fixed step.
+                // chunk use the real file length when the blob is
+                // loaded, otherwise a sentinel so the user can still
+                // click to trigger the fetch.
                 let gap_below = if chunk_idx + 1 < chunk_count {
                     let next = &file.chunks[chunk_idx + 1];
                     next.new_start.saturating_sub(chunk_end_new + 1)
+                } else if let Some(len) = blob_len_hint {
+                    len.saturating_sub(chunk_end_new)
                 } else {
-                    expand_step() * 4 // sentinel; lets user expand further
+                    // Blob not loaded yet — suppress the last-chunk
+                    // Expand button entirely. Showing a stale
+                    // sentinel ("10 lines") was misleading. Once the
+                    // pre-fetched blob arrives we re-render with the
+                    // real remaining count.
+                    0
                 };
                 let hidden_below = gap_below.saturating_sub(below_count);
                 if hidden_below > 0 {
@@ -649,7 +681,16 @@ fn push_expanded_above(
         return;
     }
     let Some(blob) = blob_lines else { return };
-    let chunk_first_new = chunk.new_start as usize;
+    // Use the chunk's actual first new-side line rather than the
+    // header `new_start` — the server sometimes pads context that
+    // shifts the visible start.
+    let chunk_first_new = chunk
+        .lines
+        .iter()
+        .filter_map(|l| l.new_line_number)
+        .min()
+        .map(|n| n as usize)
+        .unwrap_or(chunk.new_start as usize);
     if chunk_first_new <= 1 {
         return;
     }
@@ -682,7 +723,16 @@ fn push_expanded_below(
         return;
     }
     let Some(blob) = blob_lines else { return };
-    let chunk_last_new = (chunk.new_start as usize) + (chunk.new_lines as usize) - 1;
+    // Use the chunk's actual last new-side line rather than the
+    // header `new_start + new_lines - 1` — keeping this in sync with
+    // build_all_rows's `chunk_end_new`.
+    let chunk_last_new = chunk
+        .lines
+        .iter()
+        .filter_map(|l| l.new_line_number)
+        .max()
+        .map(|n| n as usize)
+        .unwrap_or((chunk.new_start as usize) + (chunk.new_lines as usize) - 1);
     let start = chunk_last_new + 1;
     let end = (start + below_count as usize).min(blob.len() + 1);
     let old_offset = chunk.old_start as i64 - chunk.new_start as i64;

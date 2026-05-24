@@ -1063,6 +1063,19 @@ impl DifitApp {
             }
             if is_markdown_path(&file.path) && self.preview_paths.contains(&file.path) {
                 self.ensure_blob(file.path.clone(), new_ref.clone(), cx);
+                continue;
+            }
+            // For every modified text file, pre-fetch the new-side
+            // blob so the last chunk's "remaining lines" Expand label
+            // shows the real count instead of the `expand_step()`
+            // sentinel. Added/Deleted files don't need it (Expand is
+            // suppressed for them entirely).
+            if matches!(
+                file.status,
+                crate::api::types::FileStatus::Modified
+                    | crate::api::types::FileStatus::Renamed
+            ) {
+                self.ensure_blob(file.path.clone(), new_ref.clone(), cx);
             }
         }
     }
@@ -1375,13 +1388,46 @@ impl DifitApp {
             .unwrap_or(true);
 
         if needs_rebuild {
-            // Snapshot the prior scroll position so cache invalidations
-            // (Expand, toggle collapsed/viewed, view-mode change, …)
-            // don't yank the viewport back to the top.
-            let prev_scroll = self
+            // Snapshot a stable "anchor" for whatever row is currently
+            // at the top of the viewport. After rebuild we look for the
+            // same anchor in the new row list and scroll back to it —
+            // raw item indices shift around when Expand inserts rows
+            // before the user's position.
+            //
+            // Prefer Line / FileHeader anchors over Expand anchors: an
+            // Expand row can disappear (e.g. after the user fully
+            // expands a region) and a row-anchor based on it would no
+            // longer match. Scan forward a handful of rows from the
+            // viewport top until we find a stable anchor.
+            let prev_anchor: Option<(RowAnchor, gpui::Pixels)> = self
                 .rendered_cache
                 .as_ref()
-                .map(|c| c.list_state.logical_scroll_top());
+                .and_then(|c| {
+                    let top = c.list_state.logical_scroll_top();
+                    const LOOKAHEAD: usize = 16;
+                    for delta in 0..LOOKAHEAD {
+                        let ix = top.item_ix + delta;
+                        let row = c.rows.get(ix)?;
+                        if let Some(a) = row_anchor(row) {
+                            if matches!(
+                                a,
+                                RowAnchor::Line { .. } | RowAnchor::FileHeader(_)
+                            ) {
+                                let offset = if delta == 0 {
+                                    top.offset_in_item
+                                } else {
+                                    gpui::px(0.0)
+                                };
+                                return Some((a, offset));
+                            }
+                        }
+                    }
+                    // Fall back to the topmost anchor, even if it's
+                    // less stable (Expand etc).
+                    let top = c.list_state.logical_scroll_top();
+                    row_anchor(c.rows.get(top.item_ix)?)
+                        .map(|a| (a, top.offset_in_item))
+                });
 
             let viewed = self.viewed_paths_for_current_repo();
             let compose_anchor =
@@ -1423,12 +1469,13 @@ impl DifitApp {
             // the thumb position is a per-item approximation rather than
             // pixel-perfect).
             let list_state = ListState::new(item_count, ListAlignment::Top, px(400.0));
-            if let Some(prev) = prev_scroll {
-                let clamped_ix = prev.item_ix.min(item_count.saturating_sub(1));
-                list_state.scroll_to(gpui::ListOffset {
-                    item_ix: clamped_ix,
-                    offset_in_item: prev.offset_in_item,
-                });
+            if let Some((anchor, offset_in_item)) = prev_anchor {
+                if let Some(new_ix) = rows.iter().position(|r| row_anchor(r).as_ref() == Some(&anchor)) {
+                    list_state.scroll_to(gpui::ListOffset {
+                        item_ix: new_ix,
+                        offset_in_item,
+                    });
+                }
             }
             self.rendered_cache = Some(RenderedCacheEntry {
                 key,
@@ -1450,6 +1497,70 @@ impl DifitApp {
         // Clearing the cache here would drop the ListState (and with it
         // the scroll offset) before `ensure_rendered` could read it.
         self.ui_version = self.ui_version.wrapping_add(1);
+    }
+}
+
+/// Stable identifier for a diff row that survives a `build_all_rows`
+/// rebuild. Used by `ensure_rendered` to restore the viewport on top of
+/// the same content after rows get inserted (e.g. via Expand).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowAnchor {
+    Line {
+        file_path: String,
+        side: DiffSide,
+        line: u32,
+    },
+    FileHeader(String),
+    Expand {
+        file_path: String,
+        chunk_idx: usize,
+        direction: crate::ui::actions::ExpandDirection,
+    },
+    Image(String),
+    Notebook(String),
+    MarkdownPreview(String),
+}
+
+fn row_anchor(row: &DiffRow) -> Option<RowAnchor> {
+    match row {
+        DiffRow::FileHeader(d) => Some(RowAnchor::FileHeader(d.path.to_string())),
+        DiffRow::Unified { file_path, cell } => cell.anchor.map(|a| RowAnchor::Line {
+            file_path: file_path.to_string(),
+            side: a.side,
+            line: a.line,
+        }),
+        DiffRow::Split {
+            file_path,
+            left,
+            right,
+        } => left
+            .as_ref()
+            .and_then(|c| c.anchor)
+            .or_else(|| right.as_ref().and_then(|c| c.anchor))
+            .map(|a| RowAnchor::Line {
+                file_path: file_path.to_string(),
+                side: a.side,
+                line: a.line,
+            }),
+        DiffRow::Expand {
+            file_path,
+            chunk_idx,
+            direction,
+            ..
+        } => Some(RowAnchor::Expand {
+            file_path: file_path.to_string(),
+            chunk_idx: *chunk_idx,
+            direction: *direction,
+        }),
+        DiffRow::Image { file_path, .. } => Some(RowAnchor::Image(file_path.to_string())),
+        DiffRow::Notebook { file_path, .. } => Some(RowAnchor::Notebook(file_path.to_string())),
+        DiffRow::MarkdownPreview { file_path, .. } => {
+            Some(RowAnchor::MarkdownPreview(file_path.to_string()))
+        }
+        DiffRow::HunkHeader { .. }
+        | DiffRow::Comment(_)
+        | DiffRow::ComposeSlot
+        | DiffRow::Spacer => None,
     }
 }
 
