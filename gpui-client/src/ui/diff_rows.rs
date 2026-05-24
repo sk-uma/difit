@@ -275,12 +275,13 @@ pub fn build_all_rows(
             // Below Expand, so we don't double up with a redundant
             // Above button.
             if ctx.mode == DiffViewMode::Unified && chunk_idx == 0 && !suppress_expand {
-                let chunk_start_new = chunk
+                let lines_min = chunk
                     .lines
                     .iter()
                     .filter_map(|l| l.new_line_number)
                     .min()
-                    .unwrap_or(chunk.new_start);
+                    .unwrap_or(u32::MAX);
+                let chunk_start_new = lines_min.min(chunk.new_start);
                 let gap_above = chunk_start_new.saturating_sub(1);
                 let hidden_above = gap_above.saturating_sub(above_count);
                 if hidden_above > 0 {
@@ -311,13 +312,16 @@ pub fn build_all_rows(
                 // cap so we don't overlap with the previous chunk's
                 // Below expansion.
                 let prev = &file.chunks[chunk_idx - 1];
-                let prev_end = prev
+                let lines_max = prev
                     .lines
                     .iter()
                     .filter_map(|l| l.new_line_number)
                     .max()
                     .map(|n| n as usize)
-                    .unwrap_or((prev.new_start as usize) + (prev.new_lines as usize) - 1);
+                    .unwrap_or(0);
+                let header_end =
+                    (prev.new_start as usize) + (prev.new_lines as usize) - 1;
+                let prev_end = lines_max.max(header_end);
                 let prev_below = expansions
                     .get(&(chunk_idx - 1))
                     .map(|(_, b)| *b)
@@ -376,18 +380,20 @@ pub fn build_all_rows(
                     &extension,
                     next_chunk_start,
                 );
-                // Walk the chunk's lines to find the actual last new-
-                // side line number. `chunk.new_lines` is the header
-                // count which doesn't always agree with the trailing
-                // context the server attached — using the real
-                // max-new-line-no keeps the "remaining lines" Expand
-                // label honest.
-                let chunk_end_new = chunk
+                // Pick the larger of (max line in chunk.lines) and the
+                // header's `new_start + new_lines - 1`. Either source
+                // can underreport in practice: chunk.lines is short
+                // when the server omits context, and the header is
+                // short when the server appends extras. Taking the max
+                // keeps the gap calculation safe in both cases.
+                let lines_max = chunk
                     .lines
                     .iter()
                     .filter_map(|l| l.new_line_number)
                     .max()
-                    .unwrap_or(chunk.new_start + chunk.new_lines - 1);
+                    .unwrap_or(0);
+                let header_end = chunk.new_start + chunk.new_lines - 1;
+                let chunk_end_new = lines_max.max(header_end);
                 // Hidden lines below = total gap minus what both sides
                 // have already revealed.
                 let (gap_below, is_middle) = if chunk_idx + 1 < chunk_count {
@@ -782,16 +788,17 @@ fn push_expanded_above(
         return;
     }
     let Some(blob) = blob_lines else { return };
-    // Use the chunk's actual first new-side line rather than the
-    // header `new_start` — the server sometimes pads context that
-    // shifts the visible start.
-    let chunk_first_new = chunk
+    // Use the smaller of (header.new_start) and (min line in
+    // chunk.lines) — chunk.lines.min() can be larger when the server
+    // omits leading context, in which case we want the header.
+    let lines_min = chunk
         .lines
         .iter()
         .filter_map(|l| l.new_line_number)
         .min()
         .map(|n| n as usize)
-        .unwrap_or(chunk.new_start as usize);
+        .unwrap_or(usize::MAX);
+    let chunk_first_new = lines_min.min(chunk.new_start as usize);
     if chunk_first_new <= 1 {
         return;
     }
@@ -830,16 +837,17 @@ fn push_expanded_below(
         return;
     }
     let Some(blob) = blob_lines else { return };
-    // Use the chunk's actual last new-side line rather than the
-    // header `new_start + new_lines - 1` — keeping this in sync with
-    // build_all_rows's `chunk_end_new`.
-    let chunk_last_new = chunk
+    // Match build_all_rows: take the larger of the chunk's actual
+    // lines and the header's declared end.
+    let lines_max = chunk
         .lines
         .iter()
         .filter_map(|l| l.new_line_number)
         .max()
         .map(|n| n as usize)
-        .unwrap_or((chunk.new_start as usize) + (chunk.new_lines as usize) - 1);
+        .unwrap_or(0);
+    let header_end = (chunk.new_start as usize) + (chunk.new_lines as usize) - 1;
+    let chunk_last_new = lines_max.max(header_end);
     let start = chunk_last_new + 1;
     let cap = next_chunk_start.unwrap_or(blob.len() + 1);
     let end = (start + below_count as usize).min(blob.len() + 1).min(cap);

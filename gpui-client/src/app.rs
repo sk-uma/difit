@@ -1406,35 +1406,14 @@ impl DifitApp {
             // expands a region) and a row-anchor based on it would no
             // longer match. Scan forward a handful of rows from the
             // viewport top until we find a stable anchor.
-            let prev_anchor: Option<(RowAnchor, gpui::Pixels)> = self
-                .rendered_cache
-                .as_ref()
-                .and_then(|c| {
-                    let top = c.list_state.logical_scroll_top();
-                    const LOOKAHEAD: usize = 16;
-                    for delta in 0..LOOKAHEAD {
-                        let ix = top.item_ix + delta;
-                        let row = c.rows.get(ix)?;
-                        if let Some(a) = row_anchor(row) {
-                            if matches!(
-                                a,
-                                RowAnchor::Line { .. } | RowAnchor::FileHeader(_)
-                            ) {
-                                let offset = if delta == 0 {
-                                    top.offset_in_item
-                                } else {
-                                    gpui::px(0.0)
-                                };
-                                return Some((a, offset));
-                            }
-                        }
-                    }
-                    // Fall back to the topmost anchor, even if it's
-                    // less stable (Expand etc).
-                    let top = c.list_state.logical_scroll_top();
-                    row_anchor(c.rows.get(top.item_ix)?)
-                        .map(|a| (a, top.offset_in_item))
-                });
+            // Steal the existing list_state (if any) so we can reuse
+            // its scroll position and per-item measurements across the
+            // rebuild. We splice the changed range into it below
+            // instead of creating a fresh ListState — recreating one
+            // and calling `scroll_to` after the fact left the layout
+            // pass rendering from item 0 until the user touched the
+            // scrollbar, which felt like a "warp" on Expand clicks.
+            let prev_cache = self.rendered_cache.take();
 
             let viewed = self.viewed_paths_for_current_repo();
             let compose_anchor =
@@ -1469,21 +1448,36 @@ impl DifitApp {
             };
             let (rows, file_starts) = build_all_rows(&diff, &ctx);
             let item_count = rows.len();
-            // We deliberately do NOT call `measure_all` here — for big
-            // diffs it's noticeably slow. The scrollbar instead estimates
-            // total height from item count, which keeps the thumb at a
-            // stable size as the user scrolls (the trade-off being that
-            // the thumb position is a per-item approximation rather than
-            // pixel-perfect).
-            let list_state = ListState::new(item_count, ListAlignment::Top, px(400.0));
-            if let Some((anchor, offset_in_item)) = prev_anchor {
-                if let Some(new_ix) = rows.iter().position(|r| row_anchor(r).as_ref() == Some(&anchor)) {
-                    list_state.scroll_to(gpui::ListOffset {
-                        item_ix: new_ix,
-                        offset_in_item,
-                    });
+            let list_state = match prev_cache.as_ref() {
+                Some(prev) => {
+                    let old = prev.rows.as_slice();
+                    let new = rows.as_slice();
+                    // Longest common prefix + suffix of identity-comparable rows.
+                    // Splice only the middle that actually changed; ListState's
+                    // splice path keeps scroll position pointing at the right
+                    // content (it shifts indices past the spliced range by the
+                    // length delta).
+                    let prefix = old
+                        .iter()
+                        .zip(new.iter())
+                        .take_while(|(a, b)| row_identity(a) == row_identity(b))
+                        .count();
+                    let remaining_old = &old[prefix..];
+                    let remaining_new = &new[prefix..];
+                    let suffix = remaining_old
+                        .iter()
+                        .rev()
+                        .zip(remaining_new.iter().rev())
+                        .take_while(|(a, b)| row_identity(a) == row_identity(b))
+                        .count();
+                    let old_changed = prefix..(old.len() - suffix);
+                    let new_changed_count = new.len() - prefix - suffix;
+                    prev.list_state.splice(old_changed, new_changed_count);
+                    prev.list_state.clone()
                 }
-            }
+                None => ListState::new(item_count, ListAlignment::Top, px(400.0)),
+            };
+            let _ = item_count;
             self.rendered_cache = Some(RenderedCacheEntry {
                 key,
                 rows: Arc::new(rows),
@@ -1508,66 +1502,105 @@ impl DifitApp {
 }
 
 /// Stable identifier for a diff row that survives a `build_all_rows`
-/// rebuild. Used by `ensure_rendered` to restore the viewport on top of
-/// the same content after rows get inserted (e.g. via Expand).
+/// rebuild. Used by `ensure_rendered`'s splice path: two rows are
+/// considered "the same" if their `row_identity` matches, which is the
+/// signal ListState's `splice` needs to keep the scroll position
+/// pointing at the right item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowAnchor {
+    Spacer,
+    ComposeSlot,
+    HunkHeader(String),
+    Comment {
+        thread_id: String,
+        message_count: usize,
+    },
     Line {
         file_path: String,
         side: DiffSide,
         line: u32,
+        marker: &'static str,
     },
-    FileHeader(String),
+    FileHeader {
+        file_path: String,
+        viewed: bool,
+        collapsed: bool,
+        previewable: bool,
+        preview_on: bool,
+        thread_count: usize,
+        additions: u32,
+        deletions: u32,
+    },
     Expand {
         file_path: String,
         chunk_idx: usize,
         direction: crate::ui::actions::ExpandDirection,
+        hidden_lines: u32,
     },
     Image(String),
     Notebook(String),
     MarkdownPreview(String),
 }
 
-fn row_anchor(row: &DiffRow) -> Option<RowAnchor> {
+/// Full row identity used for splice diffing — see `RowAnchor` doc.
+fn row_identity(row: &DiffRow) -> RowAnchor {
     match row {
-        DiffRow::FileHeader(d) => Some(RowAnchor::FileHeader(d.path.to_string())),
-        DiffRow::Unified { file_path, cell } => cell.anchor.map(|a| RowAnchor::Line {
+        DiffRow::Spacer => RowAnchor::Spacer,
+        DiffRow::ComposeSlot => RowAnchor::ComposeSlot,
+        DiffRow::HunkHeader { text, .. } => RowAnchor::HunkHeader(text.to_string()),
+        DiffRow::Comment(thread) => RowAnchor::Comment {
+            thread_id: thread.id.clone(),
+            message_count: thread.messages.len(),
+        },
+        DiffRow::FileHeader(d) => RowAnchor::FileHeader {
+            file_path: d.path.to_string(),
+            viewed: d.viewed,
+            collapsed: d.collapsed,
+            previewable: d.previewable,
+            preview_on: d.preview_on,
+            thread_count: d.thread_count,
+            additions: d.additions,
+            deletions: d.deletions,
+        },
+        DiffRow::Unified { file_path, cell } => RowAnchor::Line {
             file_path: file_path.to_string(),
-            side: a.side,
-            line: a.line,
-        }),
+            side: cell.anchor.map(|a| a.side).unwrap_or(DiffSide::New),
+            line: cell.anchor.map(|a| a.line).unwrap_or(0),
+            marker: cell.marker,
+        },
         DiffRow::Split {
             file_path,
             left,
             right,
-        } => left
-            .as_ref()
-            .and_then(|c| c.anchor)
-            .or_else(|| right.as_ref().and_then(|c| c.anchor))
-            .map(|a| RowAnchor::Line {
+        } => {
+            let a = left
+                .as_ref()
+                .and_then(|c| c.anchor)
+                .or_else(|| right.as_ref().and_then(|c| c.anchor));
+            RowAnchor::Line {
                 file_path: file_path.to_string(),
-                side: a.side,
-                line: a.line,
-            }),
+                side: a.map(|a| a.side).unwrap_or(DiffSide::New),
+                line: a.map(|a| a.line).unwrap_or(0),
+                marker: "",
+            }
+        }
         DiffRow::Expand {
             file_path,
             chunk_idx,
             direction,
+            hidden_lines,
             ..
-        } => Some(RowAnchor::Expand {
+        } => RowAnchor::Expand {
             file_path: file_path.to_string(),
             chunk_idx: *chunk_idx,
             direction: *direction,
-        }),
-        DiffRow::Image { file_path, .. } => Some(RowAnchor::Image(file_path.to_string())),
-        DiffRow::Notebook { file_path, .. } => Some(RowAnchor::Notebook(file_path.to_string())),
+            hidden_lines: *hidden_lines,
+        },
+        DiffRow::Image { file_path, .. } => RowAnchor::Image(file_path.to_string()),
+        DiffRow::Notebook { file_path, .. } => RowAnchor::Notebook(file_path.to_string()),
         DiffRow::MarkdownPreview { file_path, .. } => {
-            Some(RowAnchor::MarkdownPreview(file_path.to_string()))
+            RowAnchor::MarkdownPreview(file_path.to_string())
         }
-        DiffRow::HunkHeader { .. }
-        | DiffRow::Comment(_)
-        | DiffRow::ComposeSlot
-        | DiffRow::Spacer => None,
     }
 }
 
