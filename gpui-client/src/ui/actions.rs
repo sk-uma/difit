@@ -77,6 +77,10 @@ pub enum DiffAction {
 pub enum ExpandDirection {
     Above,
     Below,
+    /// Used only by the Expand row that sits between two chunks. The
+    /// renderer shows both an up and a down arrow; clicks dispatch
+    /// separate `Above` / `Below` actions to the respective chunks.
+    Both,
 }
 
 pub type DiffActions = Arc<dyn Fn(DiffAction, &mut Window, &mut App) + 'static>;

@@ -786,6 +786,13 @@ impl DifitApp {
         match direction {
             ExpandDirection::Above => counts.0 = counts.0.saturating_add(inc),
             ExpandDirection::Below => counts.1 = counts.1.saturating_add(inc),
+            // Both is purely a renderer affordance; clicks on the Both
+            // Expand row are split into a separate Above/Below action
+            // by `expand_row`, so this arm should never fire.
+            ExpandDirection::Both => {
+                counts.0 = counts.0.saturating_add(inc);
+                counts.1 = counts.1.saturating_add(inc);
+            }
         }
         self.expansion_version = self.expansion_version.wrapping_add(1);
         self.ensure_blob(file_path, ref_name, cx);

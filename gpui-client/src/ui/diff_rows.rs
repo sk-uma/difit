@@ -81,11 +81,18 @@ pub enum DiffRow {
     },
     /// A review comment thread anchored to the preceding diff row.
     Comment(Arc<DiffCommentThread>),
-    /// Clickable affordance for fetching more context above (▲) or below (▼).
+    /// Clickable affordance for fetching more context above (▲), below
+    /// (▼), or in both directions (used between two chunks).
     Expand {
         file_path: SharedString,
+        /// Primary chunk owning this row. For `Above` it's the chunk
+        /// the user wants to expand the area above of; for `Below` /
+        /// `Both` it's the chunk above the gap.
         chunk_idx: usize,
         direction: ExpandDirection,
+        /// For `Both`, the chunk below the gap. The up-arrow click
+        /// routes to this chunk's `Above` counter.
+        paired_chunk_idx: Option<usize>,
         /// How many lines are still hidden in this gap (0 = nothing to
         /// expand; the row is dropped before reaching the renderer).
         hidden_lines: u32,
@@ -281,6 +288,7 @@ pub fn build_all_rows(
                         file_path: path_shared.clone(),
                         chunk_idx,
                         direction: ExpandDirection::Above,
+                        paired_chunk_idx: None,
                         hidden_lines: hidden_above,
                     });
                 }
@@ -291,6 +299,38 @@ pub fn build_all_rows(
                     above_count,
                     new_blob_lines.as_deref(),
                     &extension,
+                    None,
+                );
+            } else if ctx.mode == DiffViewMode::Unified
+                && chunk_idx > 0
+                && !suppress_expand
+            {
+                // For chunks past the first, push any pre-chunk
+                // context the user already revealed via the "up"
+                // arrow in the previous gap's Both Expand row, and
+                // cap so we don't overlap with the previous chunk's
+                // Below expansion.
+                let prev = &file.chunks[chunk_idx - 1];
+                let prev_end = prev
+                    .lines
+                    .iter()
+                    .filter_map(|l| l.new_line_number)
+                    .max()
+                    .map(|n| n as usize)
+                    .unwrap_or((prev.new_start as usize) + (prev.new_lines as usize) - 1);
+                let prev_below = expansions
+                    .get(&(chunk_idx - 1))
+                    .map(|(_, b)| *b)
+                    .unwrap_or(0);
+                let floor = prev_end + (prev_below as usize) + 1;
+                push_expanded_above(
+                    &mut rows,
+                    &path_shared,
+                    chunk,
+                    above_count,
+                    new_blob_lines.as_deref(),
+                    &extension,
+                    Some(floor),
                 );
             }
 
@@ -309,10 +349,23 @@ pub fn build_all_rows(
             }
 
             if ctx.mode == DiffViewMode::Unified && !suppress_expand {
-                let next_start = if chunk_idx + 1 < chunk_count {
-                    Some(file.chunks[chunk_idx + 1].new_start as usize)
+                // For middle chunks, cap "lines pushed after this
+                // chunk" so the Below-side expansion and the next
+                // chunk's Above-side expansion can't overlap. The
+                // gap is filled symmetrically: top half from A, bottom
+                // half from B.
+                let (next_chunk_start, next_above_count) = if chunk_idx + 1 < chunk_count {
+                    let next = &file.chunks[chunk_idx + 1];
+                    let next_above = expansions
+                        .get(&(chunk_idx + 1))
+                        .map(|(a, _)| *a)
+                        .unwrap_or(0);
+                    (
+                        Some((next.new_start as usize).saturating_sub(next_above as usize)),
+                        next_above,
+                    )
                 } else {
-                    None
+                    (None, 0)
                 };
                 push_expanded_below(
                     &mut rows,
@@ -321,7 +374,7 @@ pub fn build_all_rows(
                     below_count,
                     new_blob_lines.as_deref(),
                     &extension,
-                    next_start,
+                    next_chunk_start,
                 );
                 // Walk the chunk's lines to find the actual last new-
                 // side line number. `chunk.new_lines` is the header
@@ -335,30 +388,29 @@ pub fn build_all_rows(
                     .filter_map(|l| l.new_line_number)
                     .max()
                     .unwrap_or(chunk.new_start + chunk.new_lines - 1);
-                // Hidden lines below = gap to next chunk; for the last
-                // chunk use the real file length when the blob is
-                // loaded, otherwise a sentinel so the user can still
-                // click to trigger the fetch.
-                let gap_below = if chunk_idx + 1 < chunk_count {
+                // Hidden lines below = total gap minus what both sides
+                // have already revealed.
+                let (gap_below, is_middle) = if chunk_idx + 1 < chunk_count {
                     let next = &file.chunks[chunk_idx + 1];
-                    next.new_start.saturating_sub(chunk_end_new + 1)
+                    let gap = next.new_start.saturating_sub(chunk_end_new + 1);
+                    (gap.saturating_sub(below_count + next_above_count), true)
                 } else if let Some(len) = blob_len_hint {
-                    len.saturating_sub(chunk_end_new)
+                    let gap = len.saturating_sub(chunk_end_new);
+                    (gap.saturating_sub(below_count), false)
                 } else {
-                    // Blob not loaded yet — suppress the last-chunk
-                    // Expand button entirely. Showing a stale
-                    // sentinel ("10 lines") was misleading. Once the
-                    // pre-fetched blob arrives we re-render with the
-                    // real remaining count.
-                    0
+                    (0, false)
                 };
-                let hidden_below = gap_below.saturating_sub(below_count);
-                if hidden_below > 0 {
+                if gap_below > 0 {
                     rows.push(DiffRow::Expand {
                         file_path: path_shared.clone(),
                         chunk_idx,
-                        direction: ExpandDirection::Below,
-                        hidden_lines: hidden_below,
+                        direction: if is_middle {
+                            ExpandDirection::Both
+                        } else {
+                            ExpandDirection::Below
+                        },
+                        paired_chunk_idx: if is_middle { Some(chunk_idx + 1) } else { None },
+                        hidden_lines: gap_below,
                     });
                 }
             }
@@ -713,6 +765,10 @@ fn thread_anchors_to(line: &DiffLine, thread: &DiffCommentThread) -> bool {
     }
 }
 
+// `prev_chunk_floor` is an inclusive lower bound on the first new-side
+// line we may push — set to the line just past where the previous
+// chunk's Below expansion has already filled, so the Above side of a
+// shared gap doesn't overlap with the Below side.
 fn push_expanded_above(
     rows: &mut Vec<DiffRow>,
     file_path: &SharedString,
@@ -720,6 +776,7 @@ fn push_expanded_above(
     above_count: u32,
     blob_lines: Option<&[String]>,
     extension: &str,
+    prev_chunk_floor: Option<usize>,
 ) {
     if above_count == 0 {
         return;
@@ -739,7 +796,8 @@ fn push_expanded_above(
         return;
     }
     let want = above_count as usize;
-    let start_line = chunk_first_new.saturating_sub(want).max(1);
+    let floor = prev_chunk_floor.unwrap_or(1).max(1);
+    let start_line = chunk_first_new.saturating_sub(want).max(floor);
     let line_range = start_line..chunk_first_new;
     let old_offset = chunk.old_start as i64 - chunk.new_start as i64;
     for new_line_no in line_range {

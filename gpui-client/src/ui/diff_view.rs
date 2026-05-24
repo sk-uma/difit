@@ -229,9 +229,18 @@ fn render_row(row: &DiffRow, ix: usize, font_size: f32, actions: &DiffActions) -
             file_path,
             chunk_idx,
             direction,
+            paired_chunk_idx,
             hidden_lines,
-        } => expand_row(file_path, *chunk_idx, *direction, *hidden_lines, ix, actions)
-            .into_any_element(),
+        } => expand_row(
+            file_path,
+            *chunk_idx,
+            *direction,
+            *paired_chunk_idx,
+            *hidden_lines,
+            ix,
+            actions,
+        )
+        .into_any_element(),
         DiffRow::Image {
             file_path: _,
             extension,
@@ -751,37 +760,177 @@ fn expand_row(
     file_path: &SharedString,
     chunk_idx: usize,
     direction: ExpandDirection,
+    paired_chunk_idx: Option<usize>,
     hidden_lines: u32,
     ix: usize,
     actions: &DiffActions,
 ) -> impl IntoElement {
     const DEFAULT_EXPAND_COUNT: u32 = 20;
-    let actions = actions.clone();
     let path = file_path.to_string();
-    let dir_tag = match direction {
-        ExpandDirection::Above => "above",
-        ExpandDirection::Below => "below",
-    };
-    let show_unfold_all = hidden_lines <= DEFAULT_EXPAND_COUNT;
-    let icon_name = if show_unfold_all {
-        "unfold-vertical"
-    } else if direction == ExpandDirection::Above {
-        "arrow-up-from-line"
-    } else {
-        "arrow-down-from-line"
-    };
-    let icon_size = if show_unfold_all { 16.0 } else { 12.0 };
     let label = SharedString::from(format!(
         "{hidden_lines} {}",
         if hidden_lines == 1 { "line" } else { "lines" }
     ));
+    let show_unfold_all = hidden_lines <= DEFAULT_EXPAND_COUNT;
+
+    // Build the gutter content based on direction. For Above/Below
+    // it's a single icon button; for Both it's two stacked arrows
+    // (or one "unfold all" icon when the remaining gap is small).
+    let gutter = match direction {
+        ExpandDirection::Above => single_expand_icon(
+            "arrow-up-from-line",
+            ElementId::Name(SharedString::from(format!("expand-up-{ix}"))),
+            {
+                let actions = actions.clone();
+                let path = path.clone();
+                move |w, cx| {
+                    actions(
+                        DiffAction::ExpandContext {
+                            file_path: path.clone(),
+                            chunk_idx,
+                            direction: ExpandDirection::Above,
+                        },
+                        w,
+                        cx,
+                    );
+                }
+            },
+        )
+        .into_any_element(),
+        ExpandDirection::Below if show_unfold_all => single_expand_icon(
+            "unfold-vertical",
+            ElementId::Name(SharedString::from(format!("expand-all-{ix}"))),
+            {
+                let actions = actions.clone();
+                let path = path.clone();
+                move |w, cx| {
+                    actions(
+                        DiffAction::ExpandContext {
+                            file_path: path.clone(),
+                            chunk_idx,
+                            direction: ExpandDirection::Below,
+                        },
+                        w,
+                        cx,
+                    );
+                }
+            },
+        )
+        .into_any_element(),
+        ExpandDirection::Below => single_expand_icon(
+            "arrow-down-from-line",
+            ElementId::Name(SharedString::from(format!("expand-down-{ix}"))),
+            {
+                let actions = actions.clone();
+                let path = path.clone();
+                move |w, cx| {
+                    actions(
+                        DiffAction::ExpandContext {
+                            file_path: path.clone(),
+                            chunk_idx,
+                            direction: ExpandDirection::Below,
+                        },
+                        w,
+                        cx,
+                    );
+                }
+            },
+        )
+        .into_any_element(),
+        ExpandDirection::Both if show_unfold_all => single_expand_icon(
+            "unfold-vertical",
+            ElementId::Name(SharedString::from(format!("expand-all-{ix}"))),
+            {
+                let actions = actions.clone();
+                let path = path.clone();
+                let paired = paired_chunk_idx;
+                move |w, cx| {
+                    // For "unfold all" on a middle gap, fire both
+                    // directions so the gap is fully filled.
+                    actions(
+                        DiffAction::ExpandContext {
+                            file_path: path.clone(),
+                            chunk_idx,
+                            direction: ExpandDirection::Below,
+                        },
+                        w,
+                        cx,
+                    );
+                    if let Some(p) = paired {
+                        actions(
+                            DiffAction::ExpandContext {
+                                file_path: path.clone(),
+                                chunk_idx: p,
+                                direction: ExpandDirection::Above,
+                            },
+                            w,
+                            cx,
+                        );
+                    }
+                }
+            },
+        )
+        .into_any_element(),
+        ExpandDirection::Both => stacked_arrows(
+            ix,
+            {
+                let actions = actions.clone();
+                let path = path.clone();
+                move |w, cx| {
+                    // Up arrow (top button) → grow content upward from
+                    // the button: reveal lines just after the previous
+                    // chunk (top of the gap).
+                    actions(
+                        DiffAction::ExpandContext {
+                            file_path: path.clone(),
+                            chunk_idx,
+                            direction: ExpandDirection::Below,
+                        },
+                        w,
+                        cx,
+                    );
+                }
+            },
+            {
+                let actions = actions.clone();
+                let path = path.clone();
+                let paired = paired_chunk_idx;
+                move |w, cx| {
+                    // Down arrow (bottom button) → grow content
+                    // downward: reveal lines just before the next
+                    // chunk (bottom of the gap).
+                    if let Some(p) = paired {
+                        actions(
+                            DiffAction::ExpandContext {
+                                file_path: path.clone(),
+                                chunk_idx: p,
+                                direction: ExpandDirection::Above,
+                            },
+                            w,
+                            cx,
+                        );
+                    }
+                }
+            },
+        )
+        .into_any_element(),
+    };
+
+    // React's ExpandButton has a row per direction: single-direction
+    // buttons are ~24px tall, `Both` stacks two of them inside a 48px
+    // row.
+    let row_height = if matches!(direction, ExpandDirection::Both) && !show_unfold_all {
+        48.0
+    } else {
+        24.0
+    };
 
     div()
         .id(ElementId::Name(SharedString::from(format!(
-            "expand-{ix}-{dir_tag}"
+            "expand-row-{ix}"
         ))))
         .w_full()
-        .h(px(24.0))
+        .h(px(row_height))
         .flex()
         .flex_row()
         .items_stretch()
@@ -789,35 +938,13 @@ fn expand_row(
         .border_t_1()
         .border_b_1()
         .border_color(Theme::BORDER)
-        .cursor_pointer()
-        .hover(|s| s.bg(Theme::BG_SELECTED))
-        .on_click(move |_e, window, cx| {
-            actions(
-                DiffAction::ExpandContext {
-                    file_path: path.clone(),
-                    chunk_idx,
-                    direction,
-                },
-                window,
-                cx,
-            )
-        })
         .child(
-            // Left gutter: matches the line-number column width so the
-            // icon lines up with the diff numbers.
             div()
                 .w(px(64.0))
                 .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
                 .border_r_1()
                 .border_color(Theme::BORDER)
-                .child(crate::ui::widgets::icon(
-                    icon_name,
-                    icon_size,
-                    Theme::TEXT,
-                )),
+                .child(gutter),
         )
         .child(
             div()
@@ -829,6 +956,70 @@ fn expand_row(
                 .text_size(px(12.0))
                 .font_family(MONO_FONT())
                 .child(label),
+        )
+}
+
+fn single_expand_icon(
+    icon_name: &'static str,
+    id: ElementId,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::BG_SELECTED))
+        .on_click(move |_e, w, cx| on_click(w, cx))
+        .child(crate::ui::widgets::icon(icon_name, 14.0, Theme::TEXT))
+}
+
+fn stacked_arrows(
+    ix: usize,
+    on_up: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    on_down: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "expand-up-{ix}"
+                ))))
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(Theme::BG_SELECTED))
+                .on_click(move |_e, w, cx| on_up(w, cx))
+                .child(crate::ui::widgets::icon(
+                    "arrow-up-from-line",
+                    11.0,
+                    Theme::TEXT,
+                )),
+        )
+        .child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "expand-down-{ix}"
+                ))))
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(Theme::BG_SELECTED))
+                .on_click(move |_e, w, cx| on_down(w, cx))
+                .child(crate::ui::widgets::icon(
+                    "arrow-down-from-line",
+                    11.0,
+                    Theme::TEXT,
+                )),
         )
 }
 
