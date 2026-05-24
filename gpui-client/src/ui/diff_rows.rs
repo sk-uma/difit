@@ -630,14 +630,52 @@ fn bake_text(content: &str, extension: &str, do_highlight: bool) -> (SharedStrin
         return (SharedString::from(display), Arc::new(Vec::new()));
     }
 
+    // Caching the highlight result is what keeps file collapse/expand
+    // snappy on large diffs: build_all_rows runs from scratch on every
+    // toggle, and re-running syntect for every unchanged line of every
+    // unchanged file is what made the toggle feel laggy.
+    let theme = crate::settings_store::snapshot().syntax_theme;
+    let key = BakeKey {
+        content: display.clone(),
+        extension: extension.to_string(),
+        theme,
+    };
+    {
+        let cache = BAKE_CACHE.read().unwrap();
+        if let Some(hit) = cache.get(&key) {
+            return (SharedString::from(display), hit.clone());
+        }
+    }
+
     let highlighted = highlight_line(&display, extension);
     let highlights: Vec<(Range<usize>, HighlightStyle)> = highlighted
         .spans
         .into_iter()
         .map(|(range, color)| (range, HighlightStyle::from(color)))
         .collect();
-    (SharedString::from(display), Arc::new(highlights))
+    let arc = Arc::new(highlights);
+    {
+        let mut cache = BAKE_CACHE.write().unwrap();
+        // Cheap eviction policy: dump the cache if it grows past a
+        // few thousand unique lines. Cleared entries get rebuilt
+        // lazily on next paint.
+        if cache.len() > 8_000 {
+            cache.clear();
+        }
+        cache.insert(key, arc.clone());
+    }
+    (SharedString::from(display), arc)
 }
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct BakeKey {
+    content: String,
+    extension: String,
+    theme: String,
+}
+
+static BAKE_CACHE: std::sync::LazyLock<std::sync::RwLock<HashMap<BakeKey, HighlightSpans>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
 fn push_anchored_comments(
     rows: &mut Vec<DiffRow>,
