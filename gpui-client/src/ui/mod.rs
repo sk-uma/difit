@@ -13,6 +13,7 @@ pub mod notebook_view;
 pub mod quick_menu;
 pub mod revision_modal;
 pub mod revision_picker;
+pub mod selectable_line;
 pub mod settings_modal;
 pub mod text_input;
 pub mod theme;

@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
 use gpui::{
-    canvas, div, list, prelude::*, px, AnyElement, ElementId, IntoElement, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, SharedString, Styled, StyledText,
+    canvas, div, list, prelude::*, px, AnyElement, ElementId, Entity, IntoElement, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, SharedString,
+    Styled, StyledText,
 };
 
 use crate::api::types::FileStatus;
+use crate::app::{DifitApp, SelectionColumn};
 use crate::ui::actions::{DiffAction, DiffActions, ExpandDirection};
 use crate::ui::comment_card::render_thread;
 use crate::ui::diff_rows::{DiffRow, FileHeaderData, RenderedCell};
 use crate::ui::image_viewer::render_image_diff;
 use crate::ui::markdown_view::render_markdown;
 use crate::ui::notebook_view::render_notebook;
+use crate::ui::selectable_line::SelectableLine;
 use crate::ui::theme::{Theme, MONO_FONT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,7 @@ pub fn render_main_pane(
     font_size: f32,
     actions: DiffActions,
     compose_renderer: Option<ComposeRenderer>,
+    app: Entity<DifitApp>,
 ) -> impl IntoElement {
     // Generous line-height (~1.55× the font size) matches Zed's buffer
     // breathing room — diff lines are dense and otherwise feel cramped.
@@ -63,7 +67,8 @@ pub fn render_main_pane(
         .text_color(Theme::TEXT)
         .font_family(MONO_FONT())
         .text_size(px(font_size))
-        .line_height(px((font_size * 1.55).round()));
+        .line_height(px((font_size * 1.55).round()))
+        .child(selection_mouse_capture(app.clone()));
 
     let Some(rendered) = rendered else {
         return container.child(empty_placeholder("Loading diff…"));
@@ -73,7 +78,36 @@ pub fn render_main_pane(
         return container.child(empty_placeholder("No files in this diff."));
     }
 
-    container.child(virtualized_body(rendered, font_size, actions, compose_renderer))
+    container.child(virtualized_body(rendered, font_size, actions, compose_renderer, app))
+}
+
+/// A zero-sized canvas that registers a global mouse-up handler each
+/// frame. Mouse-up flips `text_selection.active` to false so further
+/// mouse-moves stop extending the selection. SelectableLine elements
+/// register the down/move handlers themselves — this only covers the
+/// release.
+fn selection_mouse_capture(app: Entity<DifitApp>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_bounds, _, window, _cx| {
+            let app = app.clone();
+            window.on_mouse_event(move |_evt: &MouseUpEvent, phase, _window, cx| {
+                if phase != gpui::DispatchPhase::Bubble {
+                    return;
+                }
+                app.update(cx, |this, cx| {
+                    if let Some(sel) = this.text_selection.as_mut() {
+                        if sel.active {
+                            sel.active = false;
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        },
+    )
+    .w(px(0.0))
+    .h(px(0.0))
 }
 
 fn virtualized_body(
@@ -81,11 +115,13 @@ fn virtualized_body(
     font_size: f32,
     actions: DiffActions,
     compose_renderer: Option<ComposeRenderer>,
+    app: Entity<DifitApp>,
 ) -> impl IntoElement {
     let rows = rendered.rows.clone();
     let state_for_bar = rendered.list_state.clone();
     let actions_for_bar = actions.clone();
     let compose = compose_renderer;
+    let app_for_rows = app.clone();
     let list_el = list(rendered.list_state, move |ix, _window, _cx| {
         if matches!(rows[ix], DiffRow::ComposeSlot) {
             return compose
@@ -93,7 +129,7 @@ fn virtualized_body(
                 .map(|f| f())
                 .unwrap_or_else(|| div().into_any_element());
         }
-        render_row(&rows[ix], ix, font_size, &actions).into_any_element()
+        render_row(&rows[ix], ix, font_size, &actions, &app_for_rows).into_any_element()
     })
     .flex_1()
     .min_h_0()
@@ -210,20 +246,26 @@ fn list_scrollbar(state: ListState, total_items: usize, actions: DiffActions) ->
         )
 }
 
-fn render_row(row: &DiffRow, ix: usize, font_size: f32, actions: &DiffActions) -> AnyElement {
+fn render_row(
+    row: &DiffRow,
+    ix: usize,
+    font_size: f32,
+    actions: &DiffActions,
+    app: &Entity<DifitApp>,
+) -> AnyElement {
     match row {
         DiffRow::ComposeSlot => div().into_any_element(),
         DiffRow::Spacer => div().h(px(8.0)).into_any_element(),
         DiffRow::FileHeader(data) => render_file_header(data, actions).into_any_element(),
         DiffRow::HunkHeader { text, .. } => hunk_header(text.clone()).into_any_element(),
         DiffRow::Unified { file_path, cell } => {
-            unified_row(file_path, cell, ix, actions).into_any_element()
+            unified_row(file_path, cell, ix, actions, app).into_any_element()
         }
         DiffRow::Split {
             file_path,
             left,
             right,
-        } => split_row(file_path, left.as_ref(), right.as_ref(), ix, actions).into_any_element(),
+        } => split_row(file_path, left.as_ref(), right.as_ref(), ix, actions, app).into_any_element(),
         DiffRow::Comment(thread) => render_thread(thread, actions).into_any_element(),
         DiffRow::Expand {
             file_path,
@@ -510,6 +552,7 @@ fn unified_row(
     cell: &RenderedCell,
     ix: usize,
     actions: &DiffActions,
+    app: &Entity<DifitApp>,
 ) -> impl IntoElement {
     // items_start keeps the gutter / marker pinned to the first line
     // when the code column wraps to multiple lines. min_w_0 +
@@ -561,7 +604,7 @@ fn unified_row(
             }),
         ))
         .child(marker_cell(cell.marker, cell.bg))
-        .child(cell_text(cell))
+        .child(cell_text(cell, ix, SelectionColumn::Unified, app))
 }
 
 fn split_row(
@@ -570,15 +613,16 @@ fn split_row(
     right: Option<&RenderedCell>,
     ix: usize,
     actions: &DiffActions,
+    app: &Entity<DifitApp>,
 ) -> impl IntoElement {
     div()
         .w_full()
         .flex()
         .flex_row()
         .items_stretch()
-        .child(split_side(file_path, left, ix, "l", actions))
+        .child(split_side(file_path, left, ix, "l", actions, app))
         .child(div().w(px(1.0)).h_full().bg(Theme::BORDER))
-        .child(split_side(file_path, right, ix, "r", actions))
+        .child(split_side(file_path, right, ix, "r", actions, app))
 }
 
 fn split_side(
@@ -587,6 +631,7 @@ fn split_side(
     ix: usize,
     side_tag: &'static str,
     actions: &DiffActions,
+    app: &Entity<DifitApp>,
 ) -> impl IntoElement {
     let bg = cell.map(|c| c.bg).unwrap_or(Theme::BG_HOVER);
     let mut side = div().w_1_2().min_w_0().flex().flex_row().items_start().bg(bg);
@@ -621,7 +666,16 @@ fn split_side(
                 click,
             ))
             .child(marker_cell(cell.marker, cell.bg))
-            .child(cell_text(cell));
+            .child(cell_text(
+                cell,
+                ix,
+                if side_tag == "l" {
+                    SelectionColumn::SplitLeft
+                } else {
+                    SelectionColumn::SplitRight
+                },
+                app,
+            ));
     }
 
     side
@@ -664,7 +718,12 @@ fn add_button(
     btn
 }
 
-fn cell_text(cell: &RenderedCell) -> impl IntoElement {
+fn cell_text(
+    cell: &RenderedCell,
+    row_idx: usize,
+    column: SelectionColumn,
+    app: &Entity<DifitApp>,
+) -> impl IntoElement {
     // px_3 matches React's `px-3` (12px each side) on the code column.
     div()
         .flex_1()
@@ -673,9 +732,16 @@ fn cell_text(cell: &RenderedCell) -> impl IntoElement {
         .overflow_hidden()
         .px_3()
         .whitespace_normal()
-        .child(styled_text(cell))
+        .child(SelectableLine::new(
+            cell.text.clone(),
+            cell.highlights.clone(),
+            row_idx,
+            column,
+            app.clone(),
+        ))
 }
 
+#[allow(dead_code)]
 fn styled_text(cell: &RenderedCell) -> StyledText {
     if cell.highlights.is_empty() {
         StyledText::new(cell.text.clone())

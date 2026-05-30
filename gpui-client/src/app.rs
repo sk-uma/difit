@@ -24,8 +24,8 @@ use crate::ui::help_modal::render_help_modal;
 use crate::ui::image_viewer::is_image_ext;
 use crate::ui::notebook_view::is_notebook_ext;
 use crate::ui::keybindings::{
-    Compose, ComposeSubmit, Escape, NextFile, NextRow, OpenInEditor, PrevFile, PrevRow, Refresh,
-    ToggleHelp, ToggleIgnoreWhitespace, ToggleMergeBase, ToggleViewMode,
+    Compose, ComposeSubmit, CopySelection, Escape, NextFile, NextRow, OpenInEditor, PrevFile,
+    PrevRow, Refresh, ToggleHelp, ToggleIgnoreWhitespace, ToggleMergeBase, ToggleViewMode,
 };
 use crate::ui::revision_modal::render_revision_modal;
 use crate::ui::revision_picker::{render_revision_picker, RevisionRole};
@@ -111,6 +111,10 @@ pub struct DifitApp {
     /// Live-update connection status surfaced from the `/api/watch` SSE
     /// listener. Mirrors React `watchState.connectionStatus`.
     watch_status: WatchConnectionStatus,
+    /// Current cross-line text selection. `None` when nothing is
+    /// selected. Updated from SelectableLine mouse handlers; cleared on
+    /// outside click and on rendered_cache rebuild.
+    pub text_selection: Option<TextSelection>,
 }
 
 struct ComposeState {
@@ -119,6 +123,75 @@ struct ComposeState {
     line_input: Entity<TextInput>,
     body_input: Entity<TextInput>,
     mode: ComposeMode,
+}
+
+/// Which logical text column a selection lives in. Unified rows expose a
+/// single column; Split rows have one column per side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelectionColumn {
+    Unified,
+    SplitLeft,
+    SplitRight,
+}
+
+/// One end of a text selection — a (row, byte) coordinate restricted to
+/// one column. Rows are indexed into the current `rendered_cache.rows`.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionPoint {
+    pub row_idx: usize,
+    pub column: SelectionColumn,
+    pub byte: usize,
+}
+
+/// Cross-line text selection across diff rows. `active` is set while the
+/// mouse button is held during a drag; the selection persists after
+/// release until a new mouse-down clears it.
+#[derive(Debug, Clone, Copy)]
+pub struct TextSelection {
+    pub anchor: SelectionPoint,
+    pub cursor: SelectionPoint,
+    pub active: bool,
+}
+
+impl TextSelection {
+    /// Return (start, end) in document order.
+    pub fn ordered(&self) -> (SelectionPoint, SelectionPoint) {
+        let a = self.anchor;
+        let c = self.cursor;
+        let a_first = (a.row_idx, a.byte) <= (c.row_idx, c.byte);
+        if a_first {
+            (a, c)
+        } else {
+            (c, a)
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.anchor.row_idx == self.cursor.row_idx
+            && self.anchor.column == self.cursor.column
+            && self.anchor.byte == self.cursor.byte
+    }
+}
+
+fn row_text_for_column(row: &DiffRow, column: SelectionColumn) -> Option<&str> {
+    match (row, column) {
+        (DiffRow::Unified { cell, .. }, SelectionColumn::Unified) => Some(&cell.text),
+        (DiffRow::Split { left: Some(c), .. }, SelectionColumn::SplitLeft) => Some(&c.text),
+        (DiffRow::Split { right: Some(c), .. }, SelectionColumn::SplitRight) => Some(&c.text),
+        _ => None,
+    }
+}
+
+/// Round `byte` down to the previous UTF-8 char boundary. Selection
+/// byte offsets come from `closest_index_for_x` which is already
+/// boundary-aligned, but be defensive against mid-character slicing.
+fn clamp_to_char_boundary(s: &str, mut byte: usize) -> usize {
+    if byte > s.len() {
+        return s.len();
+    }
+    while byte > 0 && !s.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,6 +277,7 @@ impl DifitApp {
             viewed: ViewedStore::load(),
             auto_viewed_done: HashSet::new(),
             watch_status: WatchConnectionStatus::Connecting,
+            text_selection: None,
         });
 
         let handle = view.read(cx).focus_handle.clone();
@@ -872,6 +946,68 @@ impl DifitApp {
             self.submit_compose(cx);
         }
     }
+    fn on_copy_selection(
+        &mut self,
+        _: &CopySelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.selection_text() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// Reconstruct the selected text by walking `rendered_cache.rows`
+    /// from anchor to cursor and slicing each row's text for the
+    /// selection column. Non-selectable rows (file headers, hunks,
+    /// comments, …) are skipped — they don't have a text column the
+    /// user can drag through.
+    fn selection_text(&self) -> Option<String> {
+        let sel = self.text_selection?;
+        if sel.is_empty() {
+            return None;
+        }
+        let cache = self.rendered_cache.as_ref()?;
+        let (start, end) = sel.ordered();
+        let column = sel.anchor.column;
+        let mut out = String::new();
+        let mut wrote_any = false;
+        for row_idx in start.row_idx..=end.row_idx {
+            let Some(row) = cache.rows.get(row_idx) else {
+                continue;
+            };
+            let Some(text) = row_text_for_column(row, column) else {
+                continue;
+            };
+            let piece = if start.row_idx == end.row_idx {
+                let s = start.byte.min(text.len());
+                let e = end.byte.min(text.len()).max(s);
+                &text[clamp_to_char_boundary(text, s)..clamp_to_char_boundary(text, e)]
+            } else if row_idx == start.row_idx {
+                let s = clamp_to_char_boundary(text, start.byte.min(text.len()));
+                &text[s..]
+            } else if row_idx == end.row_idx {
+                let e = clamp_to_char_boundary(text, end.byte.min(text.len()));
+                &text[..e]
+            } else {
+                text
+            };
+            if wrote_any {
+                out.push('\n');
+            }
+            out.push_str(piece);
+            wrote_any = true;
+        }
+        if wrote_any {
+            Some(out)
+        } else {
+            None
+        }
+    }
     fn on_toggle_view_mode(
         &mut self,
         _: &ToggleViewMode,
@@ -936,6 +1072,9 @@ impl DifitApp {
         } else if self.base_picker_open || self.target_picker_open {
             self.base_picker_open = false;
             self.target_picker_open = false;
+            cx.notify();
+        } else if self.text_selection.is_some() {
+            self.text_selection = None;
             cx.notify();
         }
     }
@@ -1510,6 +1649,10 @@ impl DifitApp {
                 None => ListState::new(item_count, ListAlignment::Top, px(400.0)),
             };
             let _ = item_count;
+            // Row indices in `text_selection` are anchored to the
+            // previous cache; clear them on rebuild so stale selections
+            // don't paint on unrelated rows.
+            self.text_selection = None;
             self.rendered_cache = Some(RenderedCacheEntry {
                 key,
                 rows: Arc::new(rows),
@@ -1785,6 +1928,7 @@ impl Render for DifitApp {
             .on_action(cx.listener(Self::on_prev_file))
             .on_action(cx.listener(Self::on_compose_key))
             .on_action(cx.listener(Self::on_compose_submit_key))
+            .on_action(cx.listener(Self::on_copy_selection))
             .on_action(cx.listener(Self::on_toggle_view_mode))
             .on_action(cx.listener(Self::on_toggle_ignore_whitespace))
             .on_action(cx.listener(Self::on_toggle_merge_base))
@@ -2100,6 +2244,7 @@ impl DifitApp {
                 font_size,
                 actions,
                 compose_renderer,
+                entity.clone(),
             ))
     }
 }

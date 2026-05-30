@@ -22,6 +22,7 @@ actions!(
         OpenInEditor,
         ToggleHelp,
         Escape,
+        CopySelection,
     ]
 );
 
@@ -55,5 +56,10 @@ pub fn bind_keys(cx: &mut App) {
         // while the TextInput is focused.
         KeyBinding::new("cmd-enter", ComposeSubmit, app_or_input),
         KeyBinding::new("ctrl-enter", ComposeSubmit, app_or_input),
+        // Cmd/Ctrl+C copies the current diff text selection. Scoped
+        // with `!TextInput` so it doesn't shadow the input's own Copy
+        // binding when an input is focused.
+        KeyBinding::new("cmd-c", CopySelection, app_ctx),
+        KeyBinding::new("ctrl-c", CopySelection, app_ctx),
     ]);
 }
