@@ -19,6 +19,14 @@ use crate::ui::markdown_view::parse_inline;
 use crate::ui::theme::{Theme, MONO_FONT, UI_FONT};
 use crate::ui::widgets::icon;
 
+/// Parsed segment of a comment body: either a plain-text run rendered as
+/// inline markdown, or a fenced `\`\`\`suggestion ... \`\`\`` block that
+/// the React UI renders as a +/- diff snippet.
+enum BodyPart {
+    Text(String),
+    Suggestion(String),
+}
+
 // Yellow palette pulled from the React UI (Tailwind yellow-400 / 600 +
 // the path / button shades it derives from CSS vars).
 const YELLOW_400: Rgba = rgb(0xfacc15);
@@ -210,11 +218,7 @@ fn render_message(
     if let Some(author) = author_label {
         left = left.child(author_badge(author));
     }
-    left = left.child(
-        div()
-            .text_color(Theme::TEXT)
-            .child(render_comment_body(&msg.body)),
-    );
+    left = left.child(render_comment_body(&msg.body));
 
     let right = div()
         .flex()
@@ -323,13 +327,97 @@ fn square_icon_button(
         .child(icon(icon_name, 12.0, color))
 }
 
-fn render_comment_body(text: &str) -> StyledText {
+fn render_comment_body(text: &str) -> impl IntoElement {
+    let parts = parse_suggestion_blocks(text);
+    let mut wrap = div().flex().flex_col().gap(px(8.0)).text_color(Theme::TEXT);
+    for part in parts {
+        match part {
+            BodyPart::Text(s) => {
+                if s.trim().is_empty() {
+                    continue;
+                }
+                wrap = wrap.child(render_inline_text(&s));
+            }
+            BodyPart::Suggestion(code) => {
+                wrap = wrap.child(render_suggestion_block(code));
+            }
+        }
+    }
+    wrap
+}
+
+fn render_inline_text(text: &str) -> impl IntoElement {
     let (rendered, highlights) = parse_inline(text);
-    if highlights.is_empty() {
+    let styled = if highlights.is_empty() {
         StyledText::new(SharedString::from(rendered))
     } else {
         StyledText::new(SharedString::from(rendered)).with_highlights(highlights)
+    };
+    div().text_color(Theme::TEXT).child(styled)
+}
+
+fn render_suggestion_block(code: String) -> impl IntoElement {
+    let lines: Vec<String> = if code.is_empty() {
+        vec![String::new()]
+    } else {
+        code.split('\n').map(|s| s.to_string()).collect()
+    };
+    let mut block = div()
+        .my(px(4.0))
+        .rounded_md()
+        .overflow_hidden()
+        .border_1()
+        .border_color(Theme::BORDER)
+        .font_family(MONO_FONT())
+        .text_size(px(12.0));
+    for (i, line) in lines.iter().enumerate() {
+        block = block.child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "sugg-line-{i}"
+                ))))
+                .px(px(8.0))
+                .py(px(1.0))
+                .bg(Theme::DIFF_ADD_BG)
+                .text_color(Theme::TEXT)
+                .whitespace_nowrap()
+                .child(SharedString::from(format!("+ {line}"))),
+        );
     }
+    block
+}
+
+/// Split a comment body into alternating plain-text and ```suggestion
+/// fenced-block parts. Matches the regex used in
+/// `src/utils/suggestionUtils.ts::parseSuggestionBlocks`.
+fn parse_suggestion_blocks(body: &str) -> Vec<BodyPart> {
+    const OPEN: &str = "```suggestion\n";
+    const CLOSE: &str = "```";
+    let mut out: Vec<BodyPart> = Vec::new();
+    let mut cursor = 0;
+    while cursor < body.len() {
+        let rest = &body[cursor..];
+        let Some(open_rel) = rest.find(OPEN) else {
+            out.push(BodyPart::Text(rest.to_string()));
+            break;
+        };
+        if open_rel > 0 {
+            out.push(BodyPart::Text(body[cursor..cursor + open_rel].to_string()));
+        }
+        let body_start = cursor + open_rel + OPEN.len();
+        let Some(close_rel) = body[body_start..].find(CLOSE) else {
+            // Unterminated fence — treat the rest as text so we don't lose it.
+            out.push(BodyPart::Text(body[cursor + open_rel..].to_string()));
+            break;
+        };
+        let mut code = body[body_start..body_start + close_rel].to_string();
+        if code.ends_with('\n') {
+            code.pop();
+        }
+        out.push(BodyPart::Suggestion(code));
+        cursor = body_start + close_rel + CLOSE.len();
+    }
+    out
 }
 
 const fn rgb(hex: u32) -> Rgba {

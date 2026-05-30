@@ -16,6 +16,17 @@ pub enum WatchEvent {
     FilesChanged,
     CommentsChanged { version: u64 },
     Other(String),
+    /// Connection state transition. Mirrors React `useFileWatch`'s
+    /// `watchState.connectionStatus` so the UI can show a status pill.
+    ConnectionStatus(WatchConnectionStatus),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchConnectionStatus {
+    Connecting,
+    Connected,
+    Reconnecting,
+    Disconnected,
 }
 
 /// HTTP client targeting a running difit server.
@@ -180,7 +191,13 @@ impl ApiClient {
 
     /// Subscribe to `/api/watch`. Returns an mpsc receiver yielding parsed
     /// events; the underlying task auto-reconnects on transient failure.
+    ///
+    /// Reconnect behavior matches React `useFileWatch.ts`: at most 5
+    /// attempts with a 3s delay between them. The attempt counter resets
+    /// once a connection actually opens.
     pub fn watch_stream(&self) -> mpsc::UnboundedReceiver<WatchEvent> {
+        const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+        const RECONNECT_DELAY: Duration = Duration::from_secs(3);
         let (tx, rx) = mpsc::unbounded_channel();
         let http = self.http.clone();
         let url = self.base_url.join("/api/watch");
@@ -189,20 +206,46 @@ impl ApiClient {
                 Ok(u) => u,
                 Err(e) => {
                     log::error!("invalid /api/watch URL: {e:#}");
+                    let _ = tx.send(WatchEvent::ConnectionStatus(
+                        WatchConnectionStatus::Disconnected,
+                    ));
                     return;
                 }
             };
+            let mut attempts: u32 = 0;
             loop {
-                match watch_loop(&http, &url, &tx).await {
+                let status = if attempts == 0 {
+                    WatchConnectionStatus::Connecting
+                } else {
+                    WatchConnectionStatus::Reconnecting
+                };
+                if tx.send(WatchEvent::ConnectionStatus(status)).is_err() {
+                    return;
+                }
+                let attempts_ref = &mut attempts;
+                match watch_loop(&http, &url, &tx, attempts_ref).await {
                     Ok(()) => {
                         log::info!("watch stream closed by server");
+                        let _ = tx.send(WatchEvent::ConnectionStatus(
+                            WatchConnectionStatus::Disconnected,
+                        ));
                         break;
                     }
                     Err(e) => {
-                        log::warn!("watch stream error: {e:#}; reconnecting in 2s");
+                        log::warn!(
+                            "watch stream error: {e:#}; attempt {attempts}/{MAX_RECONNECT_ATTEMPTS}"
+                        );
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                if attempts >= MAX_RECONNECT_ATTEMPTS {
+                    log::error!("watch: max reconnection attempts reached");
+                    let _ = tx.send(WatchEvent::ConnectionStatus(
+                        WatchConnectionStatus::Disconnected,
+                    ));
+                    break;
+                }
+                attempts += 1;
+                tokio::time::sleep(RECONNECT_DELAY).await;
             }
         });
         rx
@@ -394,6 +437,7 @@ async fn watch_loop(
     http: &Client,
     url: &Url,
     tx: &mpsc::UnboundedSender<WatchEvent>,
+    attempts: &mut u32,
 ) -> Result<()> {
     let mut resp = http
         .get(url.clone())
@@ -401,6 +445,18 @@ async fn watch_loop(
         .send()
         .await?
         .error_for_status()?;
+    // We made it past `error_for_status()` — the connection is open.
+    // Reset the retry counter and announce Connected so the caller
+    // doesn't keep showing "Reconnecting…".
+    *attempts = 0;
+    if tx
+        .send(WatchEvent::ConnectionStatus(
+            WatchConnectionStatus::Connected,
+        ))
+        .is_err()
+    {
+        return Ok(());
+    }
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     while let Some(chunk) = resp.chunk().await? {
         buf.extend_from_slice(&chunk);

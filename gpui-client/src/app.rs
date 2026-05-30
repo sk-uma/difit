@@ -6,7 +6,9 @@ use gpui::{
     ListAlignment, ListOffset, ListState, ParentElement, SharedString, Styled, Window,
 };
 
-use crate::api::client::{CommentSelectionQuery, DiffQuery, WatchEvent};
+use crate::api::client::{
+    CommentSelectionQuery, DiffQuery, WatchConnectionStatus, WatchEvent,
+};
 use crate::api::types::{
     DiffCommentMessage, DiffCommentPosition, DiffCommentThread, DiffLineRange, DiffResponse,
     DiffSide, RevisionsResponse,
@@ -22,8 +24,8 @@ use crate::ui::help_modal::render_help_modal;
 use crate::ui::image_viewer::is_image_ext;
 use crate::ui::notebook_view::is_notebook_ext;
 use crate::ui::keybindings::{
-    Compose, Escape, NextFile, NextRow, OpenInEditor, PrevFile, PrevRow, Refresh, ToggleHelp,
-    ToggleIgnoreWhitespace, ToggleMergeBase, ToggleViewMode,
+    Compose, ComposeSubmit, Escape, NextFile, NextRow, OpenInEditor, PrevFile, PrevRow, Refresh,
+    ToggleHelp, ToggleIgnoreWhitespace, ToggleMergeBase, ToggleViewMode,
 };
 use crate::ui::revision_modal::render_revision_modal;
 use crate::ui::revision_picker::{render_revision_picker, RevisionRole};
@@ -106,6 +108,9 @@ pub struct DifitApp {
     /// Repos for which we've already run the auto-viewed pass this
     /// process. Prevents re-marking on every diff refresh.
     auto_viewed_done: HashSet<String>,
+    /// Live-update connection status surfaced from the `/api/watch` SSE
+    /// listener. Mirrors React `watchState.connectionStatus`.
+    watch_status: WatchConnectionStatus,
 }
 
 struct ComposeState {
@@ -198,6 +203,7 @@ impl DifitApp {
             selected_row: None,
             viewed: ViewedStore::load(),
             auto_viewed_done: HashSet::new(),
+            watch_status: WatchConnectionStatus::Connecting,
         });
 
         let handle = view.read(cx).focus_handle.clone();
@@ -346,6 +352,12 @@ impl DifitApp {
                     }
                     WatchEvent::Other(payload) => {
                         log::debug!("watch: unhandled event {payload}");
+                    }
+                    WatchEvent::ConnectionStatus(status) => {
+                        if this.watch_status != status {
+                            this.watch_status = status;
+                            cx.notify();
+                        }
                     }
                 });
                 if updated.is_err() {
@@ -702,7 +714,17 @@ impl DifitApp {
             return;
         };
         let new_state = !self.viewed.is_viewed(&repo_id, &file_path);
-        self.viewed.set_viewed(&repo_id, &file_path, new_state);
+        let hash = self
+            .diff
+            .as_ref()
+            .and_then(|d| d.files.iter().find(|f| f.path == file_path))
+            .map(crate::viewed_store::diff_content_hash);
+        if let Some(hash) = hash {
+            self.viewed
+                .set_viewed_with_hash(&repo_id, &file_path, &hash, new_state);
+        } else {
+            self.viewed.set_viewed(&repo_id, &file_path, new_state);
+        }
         if let Err(e) = self.viewed.save() {
             log::warn!("viewed save failed: {e:#}");
         }
@@ -838,6 +860,16 @@ impl DifitApp {
             self.start_compose_at_for(file_path, anchor, window, cx);
         } else {
             self.start_compose(window, cx);
+        }
+    }
+    fn on_compose_submit_key(
+        &mut self,
+        _: &ComposeSubmit,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composing.is_some() {
+            self.submit_compose(cx);
         }
     }
     fn on_toggle_view_mode(
@@ -1694,6 +1726,30 @@ impl Render for DifitApp {
         let collapsed_snapshot: HashSet<String> = self.collapsed.clone();
         let collapsed_dirs_snapshot: HashSet<String> = self.collapsed_dirs.clone();
         let filter_text: String = self.file_filter.read(cx).content().to_string();
+        let comment_counts: HashMap<String, usize> = {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for thread in comments.iter() {
+                *counts.entry(thread.file_path.clone()).or_insert(0) += 1;
+            }
+            counts
+        };
+        let changed_since_viewed: HashSet<String> = {
+            let mut set = HashSet::new();
+            if let Some(d) = self.diff.as_ref() {
+                if let Some(repo_id) = d.repository_id.as_deref() {
+                    for f in &d.files {
+                        if self.viewed.is_viewed(repo_id, &f.path) {
+                            continue;
+                        }
+                        let hash = crate::viewed_store::diff_content_hash(f);
+                        if self.viewed.is_changed_since_viewed(repo_id, &f.path, &hash) {
+                            set.insert(f.path.clone());
+                        }
+                    }
+                }
+            }
+            set
+        };
 
         // Fire off blob fetches for every special-viewer file the build
         // surfaced (image/notebook/markdown-preview). pending_blob_fetches
@@ -1728,6 +1784,7 @@ impl Render for DifitApp {
             .on_action(cx.listener(Self::on_next_file))
             .on_action(cx.listener(Self::on_prev_file))
             .on_action(cx.listener(Self::on_compose_key))
+            .on_action(cx.listener(Self::on_compose_submit_key))
             .on_action(cx.listener(Self::on_toggle_view_mode))
             .on_action(cx.listener(Self::on_toggle_ignore_whitespace))
             .on_action(cx.listener(Self::on_toggle_merge_base))
@@ -1756,6 +1813,7 @@ impl Render for DifitApp {
                 selected_base: self.selected_base.clone(),
                 selected_target: self.selected_target.clone(),
                 quick_menu_open: self.quick_menu_open,
+                watch_status: self.watch_status,
                 entity: entity.clone(),
             }))
             .child({
@@ -1767,6 +1825,8 @@ impl Render for DifitApp {
                         &viewed_paths,
                         &collapsed_snapshot,
                         &collapsed_dirs_snapshot,
+                        &comment_counts,
+                        &changed_since_viewed,
                         Some(self.file_filter.clone()),
                         &filter_text,
                         {
@@ -2057,6 +2117,7 @@ struct HeaderInputs {
     selected_base: Option<String>,
     selected_target: Option<String>,
     quick_menu_open: bool,
+    watch_status: WatchConnectionStatus,
     entity: Entity<DifitApp>,
 }
 
@@ -2074,6 +2135,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         selected_base,
         selected_target,
         quick_menu_open,
+        watch_status,
         entity,
     } = inputs;
 
@@ -2211,6 +2273,7 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         .flex_wrap()
         .items_center()
         .gap(px(16.0))
+        .child(watch_status_pill(watch_status))
         .child(right_cluster_threads)
         .child(viewed_progress(viewed_count, total_files))
         .child({
@@ -2282,6 +2345,32 @@ fn render_header(inputs: HeaderInputs) -> impl IntoElement {
         .child(left_section)
         .child(divider)
         .child(right_section)
+}
+
+/// Tiny colored dot + status text matching React's connection-status pill
+/// rendered by `useFileWatch` consumers.
+fn watch_status_pill(status: WatchConnectionStatus) -> impl IntoElement {
+    let (color, label) = match status {
+        WatchConnectionStatus::Connected => (Theme::FILE_STATUS_ADD, "Live"),
+        WatchConnectionStatus::Connecting => (Theme::FILE_STATUS_MOD, "Connecting…"),
+        WatchConnectionStatus::Reconnecting => (Theme::FILE_STATUS_MOD, "Reconnecting…"),
+        WatchConnectionStatus::Disconnected => (Theme::FILE_STATUS_DEL, "Offline"),
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(11.0))
+        .text_color(Theme::TEXT_MUTED)
+        .child(
+            div()
+                .w(px(8.0))
+                .h(px(8.0))
+                .rounded_full()
+                .bg(color),
+        )
+        .child(SharedString::from(label))
 }
 
 fn toggle_header_button(

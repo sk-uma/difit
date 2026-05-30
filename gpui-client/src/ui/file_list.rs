@@ -5,7 +5,7 @@
 //! shows status badge + viewed checkbox + comment counter and scrolls
 //! the main pane to the file on click.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     div, prelude::*, px, App, ElementId, Entity, IntoElement, ParentElement, SharedString, Styled,
@@ -23,6 +23,8 @@ pub fn render_file_list(
     viewed: &HashSet<String>,
     collapsed_files: &HashSet<String>,
     collapsed_dirs: &HashSet<String>,
+    comment_counts: &HashMap<String, usize>,
+    changed_since_viewed: &HashSet<String>,
     filter_input: Option<Entity<TextInput>>,
     filter_text: &str,
     on_select: impl Fn(usize, &mut App) + 'static + Clone,
@@ -39,7 +41,6 @@ pub fn render_file_list(
         .filter(|(_, f)| filter_lc.is_empty() || f.path.to_ascii_lowercase().contains(&filter_lc))
         .collect();
 
-    let _ = viewed; // suppressed: counter dropped in favor of +/- totals
     let total_additions: u32 = files.iter().map(|f| f.additions).sum();
     let total_deletions: u32 = files.iter().map(|f| f.deletions).sum();
 
@@ -52,6 +53,8 @@ pub fn render_file_list(
         collapsed_dirs,
         viewed,
         collapsed_files,
+        comment_counts,
+        changed_since_viewed,
         selected,
         &on_select,
         &on_toggle_viewed,
@@ -313,6 +316,8 @@ fn render_nodes(
     collapsed_dirs: &HashSet<String>,
     viewed: &HashSet<String>,
     collapsed_files: &HashSet<String>,
+    comment_counts: &HashMap<String, usize>,
+    changed_since_viewed: &HashSet<String>,
     selected: Option<usize>,
     on_select: &(impl Fn(usize, &mut App) + 'static + Clone),
     on_toggle_viewed: &(impl Fn(usize, &mut App) + 'static + Clone),
@@ -364,6 +369,8 @@ fn render_nodes(
                         collapsed_dirs,
                         viewed,
                         collapsed_files,
+                        comment_counts,
+                        changed_since_viewed,
                         selected,
                         on_select,
                         on_toggle_viewed,
@@ -384,6 +391,8 @@ fn render_nodes(
                 let is_viewed = viewed.contains(path);
                 let is_selected = selected == Some(*file_idx);
                 let is_collapsed = collapsed_files.contains(path);
+                let comment_count = comment_counts.get(path).copied().unwrap_or(0);
+                let is_changed = changed_since_viewed.contains(path);
                 out.push(
                     file_row(
                         *file_idx,
@@ -392,7 +401,9 @@ fn render_nodes(
                         status,
                         *additions,
                         *deletions,
+                        comment_count,
                         is_viewed,
+                        is_changed,
                         is_selected,
                         is_collapsed,
                         depth,
@@ -415,7 +426,9 @@ fn file_row(
     status: &FileStatus,
     additions: u32,
     deletions: u32,
+    comment_count: usize,
     viewed: bool,
+    changed_since_viewed: bool,
     selected: bool,
     collapsed: bool,
     depth: usize,
@@ -470,6 +483,8 @@ fn file_row(
         }))
         .child(status_badge(status))
         .child(name_text)
+        .child(changed_badge(changed_since_viewed))
+        .child(comment_count_badge(comment_count))
         .child(
             div()
                 .flex()
@@ -489,6 +504,38 @@ fn file_row(
                         .child(SharedString::from(format!("-{deletions}"))),
                 ),
         )
+}
+
+fn changed_badge(show: bool) -> impl IntoElement {
+    let mut wrap = div().flex().flex_shrink_0().items_center();
+    if show {
+        wrap = wrap
+            .px(px(6.0))
+            .py(px(1.0))
+            .rounded_full()
+            .bg(Theme::FILE_STATUS_MOD)
+            .text_color(Theme::BG)
+            .text_size(px(10.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(SharedString::from("Changed"));
+    }
+    wrap
+}
+
+fn comment_count_badge(count: usize) -> impl IntoElement {
+    let mut wrap = div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .text_size(px(12.0));
+    if count > 0 {
+        wrap = wrap
+            .text_color(Theme::FILE_STATUS_MOD)
+            .child(icon("message-square", 12.0, Theme::FILE_STATUS_MOD))
+            .child(SharedString::from(count.to_string()));
+    }
+    wrap
 }
 
 fn collapse_chevron(

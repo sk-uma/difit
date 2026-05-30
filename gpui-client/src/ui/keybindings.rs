@@ -14,6 +14,7 @@ actions!(
         NextRow,
         PrevRow,
         Compose,
+        ComposeSubmit,
         ToggleViewMode,
         ToggleIgnoreWhitespace,
         ToggleMergeBase,
@@ -49,5 +50,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("o", OpenInEditor, app_ctx),
         KeyBinding::new("shift-/", ToggleHelp, app_ctx),
         KeyBinding::new("escape", Escape, app_or_input),
+        // Cmd/Ctrl+Enter submits the compose form. Matches React's
+        // CommentForm shortcut. Bound on `DifitApp` so it still fires
+        // while the TextInput is focused.
+        KeyBinding::new("cmd-enter", ComposeSubmit, app_or_input),
+        KeyBinding::new("ctrl-enter", ComposeSubmit, app_or_input),
     ]);
 }
